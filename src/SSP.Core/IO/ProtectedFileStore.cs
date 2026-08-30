@@ -1,0 +1,309 @@
+// File: src/SSP.Core/IO/ProtectedFileStore.cs
+//
+// Encryption-at-rest for SSP service-directory state files:
+//   - .cache.dat
+//   - .sysdata.bin
+//   - .runtime.dat
+//   - .index.dat
+//
+// Production Windows builds use DPAPI (ProtectedData) with LocalMachine
+// scope so data written during SETUP MODE remains readable by the Windows
+// Service account at runtime. The encryption key is managed by Windows and
+// is never written to the service directory, the protected files, or the
+// repository.
+
+using System.Security.Cryptography;
+using System.Text;
+
+namespace SSP.Core.IO;
+
+/// <summary>
+/// Low-level storage wrapper for the four SSP files that must be encrypted
+/// at rest. Callers still work with the exact same logical UTF-8 text they
+/// used before; only the bytes persisted on disk are protected.
+/// </summary>
+public static class ProtectedFileStore
+{
+    private static readonly byte[] Magic = "SSP-EAR1"u8.ToArray();
+    private const byte DpapiLocalMachineAlgorithm = 1;
+    private const byte NonWindowsAesGcmAlgorithm = 2;
+    private const int AesKeySizeBytes = 32;
+    private const int AesNonceSizeBytes = 12;
+    private const int AesTagSizeBytes = 16;
+
+    // DPAPI optional entropy is a purpose string, not a secret key. Keeping
+    // it in code prevents accidental cross-use with unrelated ProtectedData.
+    private static readonly byte[] DpapiOptionalEntropy =
+        Encoding.UTF8.GetBytes("SSP encrypted-at-rest service storage v1");
+
+    private static readonly string[] ProtectedFileNames =
+    {
+        ".cache.dat",
+        ".sysdata.bin",
+        ".runtime.dat",
+        ".index.dat",
+    };
+
+    private static readonly object NonWindowsKeyLock = new();
+    private static byte[]? _cachedNonWindowsKey;
+
+    public readonly record struct ReadTextResult(
+        string Text,
+        bool WasEncrypted,
+        bool WasPlaintextProtectedFile);
+
+    /// <summary>
+    /// True only for the four service state files covered by the
+    /// encrypted-at-rest requirement. Other SSP files keep their existing
+    /// storage format.
+    /// </summary>
+    public static bool IsProtectedPath(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        return ProtectedFileNames.Any(name =>
+            string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Test/diagnostic helper: identifies files already written in the SSP
+    /// encrypted-at-rest envelope without decrypting them.
+    /// </summary>
+    public static bool HasEncryptedEnvelope(byte[] bytes)
+    {
+        return bytes.Length > Magic.Length && bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic);
+    }
+
+    /// <summary>
+    /// Diagnostics only: Windows uses DPAPI and therefore has no SSP key file.
+    /// Non-Windows test/development hosts keep their fallback key outside the
+    /// repository and outside service directories.
+    /// </summary>
+    public static string? ExternalKeyPathForDiagnostics =>
+        OperatingSystem.IsWindows() ? null : ResolveNonWindowsKeyPath();
+
+    public static async Task<ReadTextResult> ReadTextAsync(string path, CancellationToken ct = default)
+    {
+        var bytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
+        var protectedPath = IsProtectedPath(path);
+        if (protectedPath && TryUnprotect(bytes, out var plaintext))
+        {
+            return new ReadTextResult(
+                DecodeUtf8Text(plaintext),
+                WasEncrypted: true,
+                WasPlaintextProtectedFile: false);
+        }
+
+        return new ReadTextResult(
+            DecodeUtf8Text(bytes),
+            WasEncrypted: false,
+            WasPlaintextProtectedFile: protectedPath);
+    }
+
+    public static Task WriteTextAsync(string path, string content, CancellationToken ct = default)
+    {
+        if (!IsProtectedPath(path))
+            return AtomicFile.WriteTextAsync(path, content, ct);
+
+        var plaintext = Encoding.UTF8.GetBytes(content);
+        var protectedBytes = Protect(plaintext);
+        CryptographicOperations.ZeroMemory(plaintext);
+        return AtomicFile.WriteBytesAsync(path, protectedBytes, ct);
+    }
+
+    /// <summary>
+    /// Rewrites an existing plaintext protected file into the encrypted
+    /// envelope after the higher-level store has successfully validated it.
+    /// </summary>
+    public static Task MigratePlaintextAsync(string path, ReadTextResult read, CancellationToken ct = default)
+    {
+        if (!read.WasPlaintextProtectedFile)
+            return Task.CompletedTask;
+
+        return WriteTextAsync(path, read.Text, ct);
+    }
+
+    private static string DecodeUtf8Text(byte[] bytes)
+    {
+        var text = Encoding.UTF8.GetString(bytes);
+        return text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text;
+    }
+
+    private static byte[] Protect(byte[] plaintext)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var protectedPayload = ProtectedData.Protect(
+                plaintext,
+                DpapiOptionalEntropy,
+                DataProtectionScope.LocalMachine);
+
+            return BuildEnvelope(DpapiLocalMachineAlgorithm, protectedPayload);
+        }
+
+        return ProtectWithNonWindowsAesGcm(plaintext);
+    }
+
+    private static bool TryUnprotect(byte[] bytes, out byte[] plaintext)
+    {
+        plaintext = Array.Empty<byte>();
+
+        if (!HasEncryptedEnvelope(bytes))
+            return false;
+
+        var algorithm = bytes[Magic.Length];
+        var payload = bytes.AsSpan(Magic.Length + 1);
+
+        plaintext = algorithm switch
+        {
+            DpapiLocalMachineAlgorithm => UnprotectWithWindowsDpapi(payload),
+            NonWindowsAesGcmAlgorithm => UnprotectWithNonWindowsAesGcm(payload),
+            _ => throw new CryptographicException($"Unsupported SSP encrypted-at-rest file format version/algorithm: {algorithm}.")
+        };
+
+        return true;
+    }
+
+    private static byte[] BuildEnvelope(byte algorithm, byte[] protectedPayload)
+    {
+        var envelope = new byte[Magic.Length + 1 + protectedPayload.Length];
+        Magic.CopyTo(envelope, 0);
+        envelope[Magic.Length] = algorithm;
+        protectedPayload.CopyTo(envelope, Magic.Length + 1);
+        return envelope;
+    }
+
+    private static byte[] UnprotectWithWindowsDpapi(ReadOnlySpan<byte> payload)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("DPAPI-protected SSP files can only be decrypted on Windows.");
+
+        return ProtectedData.Unprotect(
+            payload.ToArray(),
+            DpapiOptionalEntropy,
+            DataProtectionScope.LocalMachine);
+    }
+
+    /// <summary>
+    /// Portable fallback for non-Windows test/development hosts. Windows
+    /// production never uses this path; it exists so the cross-platform test
+    /// suite can exercise encrypted-at-rest semantics without DPAPI. The
+    /// generated key is outside the repository and outside every service
+    /// directory, protected by user-only filesystem permissions where the
+    /// platform supports them.
+    /// </summary>
+    private static byte[] ProtectWithNonWindowsAesGcm(byte[] plaintext)
+    {
+        var key = GetOrCreateNonWindowsKey();
+        var nonce = RandomNumberGenerator.GetBytes(AesNonceSizeBytes);
+        var ciphertext = new byte[plaintext.Length];
+        var tag = new byte[AesTagSizeBytes];
+
+        using (var aes = new AesGcm(key, AesTagSizeBytes))
+        {
+            aes.Encrypt(nonce, plaintext, ciphertext, tag);
+        }
+
+        var payload = new byte[AesNonceSizeBytes + AesTagSizeBytes + ciphertext.Length];
+        nonce.CopyTo(payload, 0);
+        tag.CopyTo(payload, AesNonceSizeBytes);
+        ciphertext.CopyTo(payload, AesNonceSizeBytes + AesTagSizeBytes);
+        return BuildEnvelope(NonWindowsAesGcmAlgorithm, payload);
+    }
+
+    private static byte[] UnprotectWithNonWindowsAesGcm(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < AesNonceSizeBytes + AesTagSizeBytes)
+            throw new CryptographicException("SSP encrypted-at-rest payload is truncated.");
+
+        var key = GetOrCreateNonWindowsKey();
+        var nonce = payload[..AesNonceSizeBytes];
+        var tag = payload.Slice(AesNonceSizeBytes, AesTagSizeBytes);
+        var ciphertext = payload[(AesNonceSizeBytes + AesTagSizeBytes)..];
+        var plaintext = new byte[ciphertext.Length];
+
+        using (var aes = new AesGcm(key, AesTagSizeBytes))
+        {
+            aes.Decrypt(nonce, ciphertext, tag, plaintext);
+        }
+
+        return plaintext;
+    }
+
+    private static byte[] GetOrCreateNonWindowsKey()
+    {
+        lock (NonWindowsKeyLock)
+        {
+            if (_cachedNonWindowsKey != null)
+                return _cachedNonWindowsKey;
+
+            var keyPath = ResolveNonWindowsKeyPath();
+            var keyDir = Path.GetDirectoryName(keyPath)!;
+            Directory.CreateDirectory(keyDir);
+            TryRestrictDirectoryPermissions(keyDir);
+
+            if (File.Exists(keyPath))
+            {
+                TryRestrictFilePermissions(keyPath);
+                var existing = File.ReadAllBytes(keyPath);
+                if (existing.Length != AesKeySizeBytes)
+                    throw new CryptographicException($"Invalid SSP encrypted-at-rest key material at {keyPath}.");
+
+                _cachedNonWindowsKey = existing;
+                return _cachedNonWindowsKey;
+            }
+
+            var generated = RandomNumberGenerator.GetBytes(AesKeySizeBytes);
+            try
+            {
+                using var fs = new FileStream(keyPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                fs.Write(generated, 0, generated.Length);
+                TryRestrictFilePermissions(keyPath);
+                _cachedNonWindowsKey = generated;
+                return _cachedNonWindowsKey;
+            }
+            catch (IOException) when (File.Exists(keyPath))
+            {
+                CryptographicOperations.ZeroMemory(generated);
+                TryRestrictFilePermissions(keyPath);
+                var existing = File.ReadAllBytes(keyPath);
+                if (existing.Length != AesKeySizeBytes)
+                    throw new CryptographicException($"Invalid SSP encrypted-at-rest key material at {keyPath}.");
+
+                _cachedNonWindowsKey = existing;
+                return _cachedNonWindowsKey;
+            }
+        }
+    }
+
+    private static string ResolveNonWindowsKeyPath()
+    {
+        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            root = string.IsNullOrWhiteSpace(home)
+                ? Path.Combine(Path.GetTempPath(), "ssp")
+                : Path.Combine(home, ".local", "share");
+        }
+
+        return Path.Combine(root, "SSP", "protected-storage", "encrypted-at-rest.key");
+    }
+
+    private static void TryRestrictDirectoryPermissions(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        try { File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
+        catch { /* best effort */ }
+    }
+
+    private static void TryRestrictFilePermissions(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        try { File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite); }
+        catch { /* best effort */ }
+    }
+}

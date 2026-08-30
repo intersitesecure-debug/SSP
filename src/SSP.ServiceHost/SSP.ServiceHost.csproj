@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ============================================================
+    SSP.ServiceHost - the standalone Windows Service image.
+    ============================================================
+    This is NOT a rename or a copy of SSP.Server.exe. It is a separate
+    assembly with its own identity (AssemblyName SSP.ServiceHost) whose
+    single purpose is to be the executable the SCM starts for a service.
+    WindowsServiceInstaller extracts the published, self-contained
+    single-file form of THIS project into each service directory, so a
+    newly created service runs entirely from its own host image and the
+    setup executable (C:\Program Files\SSP\SSP.Server.exe) is referenced
+    by no ImagePath and can be moved or deleted once creation finished.
+
+    The publish profile below mirrors SSP.Server's: `dotnet publish
+    -p:PublishSingleFile=true` (which is what SSP.Server's
+    PublishServiceHostTemplate build target invokes) produces one
+    self-sufficient win-x64 executable with the whole runtime bundled.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SSP.ServiceHost</AssemblyName>
+    <RootNamespace>SSP.ServiceHost</RootNamespace>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SSP.Server\SSP.Server.csproj" />
+  </ItemGroup>
+
+</Project>

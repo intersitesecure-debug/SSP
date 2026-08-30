@@ -1,0 +1,211 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SSP.Server</AssemblyName>
+    <RootNamespace>SSP.Server</RootNamespace>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!--
+    ============================================================
+    PUBLISH PROFILE for SSP.Server (single-file self-contained)
+    ============================================================
+    These properties activate only when `dotnet publish` is called
+    with -p:PublishSingleFile=true. They have no effect on regular
+    builds or unit tests so existing tests are not broken.
+    ============================================================
+  -->
+  <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <!--
+    Static properties used by both the publish target and the static
+    EmbeddedResource item.
+
+    FIX (spec §6 / §20): The embedded client template MUST be a real
+    self-contained single-file win-x64 PE executable, NOT a renamed
+    SSP.Client.dll. Previously ClientExePath pointed at
+    SSP.Client.dll (a framework-dependent assembly of a few hundred
+    KB), which violates the spec requirement that the embedded
+    template be a genuine .NET 8 self-contained single-file Windows
+    executable of tens of MB.
+
+    We publish SSP.Client with:
+        -r win-x64 -p:PublishSingleFile=true -p:SelfContained=true
+        -p:IncludeNativeLibrariesForSelfExtract=true
+        -p:IncludeAllContentForSelfExtract=true
+        -p:EnableCompressionInSingleFile=false
+        -p:DebugType=embedded
+    and embed the resulting SSP.Client.exe (the apphost with the
+    single-file bundle attached).
+
+    TEST FALLBACK: when SSP_SKIP_EMBED=1 is set (used by unit tests
+    to break the recursive build cycle and to avoid the slow cross-
+    publish of win-x64 on every test run), we still need an embedded
+    template so EmbeddedClientTemplateTests can run. In that case we
+    fall back to the regular framework-dependent SSP.Client.dll
+    produced by the normal SSP.Client build. This fallback is ONLY
+    used for in-process testing - production publishes always use the
+    real single-file SSP.Client.exe.
+  -->
+  <PropertyGroup>
+    <ClientProjectDir>$(MSBuildThisFileDirectory)../SSP.Client</ClientProjectDir>
+    <ClientPublishDir>$(MSBuildThisFileDirectory)../SSP.Client/bin/$(Configuration)/publish</ClientPublishDir>
+    <ClientExeName>SSP.Client</ClientExeName>
+    <ClientExePath>$(ClientPublishDir)/$(ClientExeName).exe</ClientExePath>
+    <!--
+      Fallback for tests / nested (SSP_SKIP_EMBED=true) builds: the
+      framework-dependent DLL from the regular SSP.Client build output.
+      The SDK emits that output under bin/$(Configuration)/net8.0/ and,
+      whenever a RuntimeIdentifier is in play (every publish in this repo
+      passes -r win-x64), under bin/$(Configuration)/net8.0/$(RuntimeIdentifier)/.
+      The nested SSP.ServiceHost publish builds SSP.Client with
+      RuntimeIdentifier=win-x64 (global property propagation), so its DLL
+      only exists in the RID subfolder; the fallback must mirror that layout
+      or csc fails with CS1566 when reading the embedded resource.
+    -->
+    <ClientDllPath Condition="'$(RuntimeIdentifier)' == ''">$(MSBuildThisFileDirectory)../SSP.Client/bin/$(Configuration)/net8.0/$(ClientExeName).dll</ClientDllPath>
+    <ClientDllPath Condition="'$(RuntimeIdentifier)' != ''">$(MSBuildThisFileDirectory)../SSP.Client/bin/$(Configuration)/net8.0/$(RuntimeIdentifier)/$(ClientExeName).dll</ClientDllPath>
+    <EmbeddedResourceName>SSP.Server.Embedded.SSP.Client.bin</EmbeddedResourceName>
+  </PropertyGroup>
+
+  <!--
+    The standalone Windows Service host image (src/SSP.ServiceHost). Each
+    newly created service runs this host binary - extracted from the
+    resource below into its own service directory - and never a copy of
+    SSP.Server.exe; see PublishServiceHostTemplate below and
+    WindowsServiceInstaller.PrepareServiceHostImageAsync.
+    The LogicalName must stay in sync with
+    SSP.Core.Util.EmbeddedResourceNames.ServiceHostImage.
+  -->
+  <PropertyGroup>
+    <ServiceHostProjectDir>$(MSBuildThisFileDirectory)../SSP.ServiceHost</ServiceHostProjectDir>
+    <ServiceHostPublishDir>$(MSBuildThisFileDirectory)../SSP.ServiceHost/bin/$(Configuration)/publish</ServiceHostPublishDir>
+    <ServiceHostExeName>SSP.ServiceHost</ServiceHostExeName>
+    <ServiceHostExePath>$(ServiceHostPublishDir)/$(ServiceHostExeName).exe</ServiceHostExePath>
+    <ServiceHostResourceName>SSP.Server.Embedded.SSP.ServiceHost.bin</ServiceHostResourceName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.0" />
+    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SSP.Core\SSP.Core.csproj" />
+    <ProjectReference Include="..\SSP.Client\SSP.Client.csproj" />
+  </ItemGroup>
+
+  <!--
+    Choose the embedded template path:
+      - Production (SSP_SKIP_EMBED != 'true'): use the single-file
+        SSP.Client.exe produced by PublishClientTemplate below, and the
+        single-file SSP.ServiceHost.exe produced by
+        PublishServiceHostTemplate below.
+      - Tests (SSP_SKIP_EMBED == 'true'): use the framework-dependent
+        SSP.Client.dll from the regular build output. No service-host
+        fallback is embedded: SSP.ServiceHost depends on SSP.Server, so
+        its DLL cannot be guaranteed to exist when SSP.Server is
+        evaluated, and the extraction contract is exercised through the
+        documented SSP_SERVICE_HOST_IMAGE seam instead. Production
+        publishes always embed the real single-file images.
+
+    Both client files contain the patch-slot sentinel because the sentinel
+    is embedded as a manifest resource at SSP.Client build time.
+  -->
+  <Choose>
+    <When Condition="'$(SSP_SKIP_EMBED)' == 'true'">
+      <ItemGroup>
+        <EmbeddedResource Include="$(ClientDllPath)">
+          <LogicalName>$(EmbeddedResourceName)</LogicalName>
+        </EmbeddedResource>
+      </ItemGroup>
+    </When>
+    <Otherwise>
+      <ItemGroup>
+        <EmbeddedResource Include="$(ClientExePath)">
+          <LogicalName>$(EmbeddedResourceName)</LogicalName>
+        </EmbeddedResource>
+        <EmbeddedResource Include="$(ServiceHostExePath)">
+          <LogicalName>$(ServiceHostResourceName)</LogicalName>
+        </EmbeddedResource>
+      </ItemGroup>
+    </Otherwise>
+  </Choose>
+
+  <!--
+    Publish SSP.Client as a self-contained single-file win-x64 exe
+    before CoreCompile runs. The output file is then picked up by the
+    static EmbeddedResource item above and embedded into SSP.Server.dll.
+
+    FIX (spec §6 / §20): The publish command now passes:
+        -r win-x64
+        -p:PublishSingleFile=true
+        -p:SelfContained=true
+        -p:IncludeNativeLibrariesForSelfExtract=true
+        -p:IncludeAllContentForSelfExtract=true
+        -p:EnableCompressionInSingleFile=false
+        -p:DebugType=embedded
+    so the produced file is a real self-contained single-file Windows
+    PE executable, not a renamed framework-dependent DLL.
+
+    This target does NOT run during design-time builds or when
+    SSP_SKIP_EMBED is set (used by tests to break the recursive
+    build cycle and to use the fallback framework-dependent DLL).
+  -->
+  <Target Name="PublishClientTemplate"
+          BeforeTargets="CoreCompile"
+          Condition="'$(DesignTimeBuild)' != 'true' AND '$(SSP_SKIP_EMBED)' != 'true'">
+
+    <Exec Command="dotnet publish &quot;$(ClientProjectDir)/SSP.Client.csproj&quot; -c $(Configuration) -f net8.0 -r win-x64 -o &quot;$(ClientPublishDir)&quot; /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true /p:IncludeAllContentForSelfExtract=true /p:EnableCompressionInSingleFile=false /p:DebugType=embedded /p:DesignTimeBuild=false /p:SSP_SKIP_EMBED=true"
+          ConsoleToMSBuild="true" />
+
+    <Error Condition="!Exists('$(ClientExePath)')"
+           Text="SSP.Client single-file publish output not found at $(ClientExePath). The embedded client template cannot be built." />
+
+    <Message Text="[SSP.Server] Embedded self-contained single-file SSP.Client from $(ClientExePath) as resource $(EmbeddedResourceName)" Importance="high" />
+  </Target>
+
+  <!--
+    Publish SSP.ServiceHost as a self-contained single-file win-x64 exe
+    before CoreCompile runs, exactly like the client template above. The
+    resulting file is the STANDALONE WINDOWS SERVICE IMAGE: each newly
+    created service extracts it from this assembly's resources into its own
+    service directory, so services never reference (and nothing ever
+    copies) the setup executable C:\Program Files\SSP\SSP.Server.exe.
+
+    The nested publish builds SSP.ServiceHost - and, through its project
+    reference, SSP.Server itself - with SSP_SKIP_EMBED=true, which skips
+    both template targets inside that nested build and keeps the
+    recursion bounded (same mechanism the client template relies on).
+
+    This target does NOT run during design-time builds or when
+    SSP_SKIP_EMBED is set (test builds).
+  -->
+  <Target Name="PublishServiceHostTemplate"
+          BeforeTargets="CoreCompile"
+          Condition="'$(DesignTimeBuild)' != 'true' AND '$(SSP_SKIP_EMBED)' != 'true'">
+
+    <Exec Command="dotnet publish &quot;$(ServiceHostProjectDir)/SSP.ServiceHost.csproj&quot; -c $(Configuration) -f net8.0 -r win-x64 -o &quot;$(ServiceHostPublishDir)&quot; /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true /p:IncludeAllContentForSelfExtract=true /p:EnableCompressionInSingleFile=false /p:DebugType=embedded /p:DesignTimeBuild=false /p:SSP_SKIP_EMBED=true"
+          ConsoleToMSBuild="true" />
+
+    <Error Condition="!Exists('$(ServiceHostExePath)')"
+           Text="SSP.ServiceHost single-file publish output not found at $(ServiceHostExePath). The embedded service host image cannot be built." />
+
+    <Message Text="[SSP.Server] Embedded self-contained single-file SSP.ServiceHost from $(ServiceHostExePath) as resource $(ServiceHostResourceName)" Importance="high" />
+  </Target>
+
+</Project>

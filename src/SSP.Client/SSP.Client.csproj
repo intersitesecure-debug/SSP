@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SSP.Client</AssemblyName>
+    <RootNamespace>SSP.Client</RootNamespace>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SSP.Core\SSP.Core.csproj" />
+  </ItemGroup>
+
+  <!--
+    The patch slot is a small static file that contains:
+       __SSP_CLIENT_PATCH_BEGIN__\n
+       <4096 spaces>\n
+       __SSP_CLIENT_PATCH_END__
+    The SetupEngine patcher scans the COMPILED BINARY for the sentinels
+    and overwrites the 4096-space body with the JSON-encoded
+    ClientConfig (also 4096 bytes, padded with spaces).
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="patch_slot_template.bin">
+      <LogicalName>SSP.Client.PatchSlot.bin</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!--
+    client_services.json is EMBEDDED in the client executable instead of
+    being written next to it, so a provisioned client is a single EXE.
+    The resource is a small static file that contains:
+       __SSP_CLIENT_SERVICES_BEGIN__\n
+       <131072 spaces>\n
+       __SSP_CLIENT_SERVICES_END__
+    SetupEngine scans the COMPILED BINARY for those sentinels and
+    overwrites the 131072-space body with the plain (unencoded,
+    uncompressed) JSON of the ClientServiceBundle, space-padded to the
+    same fixed length so the binary keeps its size. At startup the
+    client reads this resource directly - no sidecar file is written,
+    extracted or required.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="client_services_template.bin">
+      <LogicalName>SSP.Client.ClientServices.json</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!--
+    PDBها را داخل DLL embed می‌کند تا در publish single-file خروجی
+    SSP.Server.exe به‌صورت تک‌فایل واقعی باشد (بدون SSP.Client.pdb).
+    در Debug build، .NET SDK این را به full override می‌کند.
+  -->
+  <PropertyGroup>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+</Project>
