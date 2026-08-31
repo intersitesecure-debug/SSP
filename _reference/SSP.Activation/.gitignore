@@ -1,0 +1,17 @@
+# Build artifacts
+bin/
+obj/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+
+# Test output
+TestResults/
+tests/**/test-tmp/
+
+# OS
+.DS_Store
+Thumbs.db

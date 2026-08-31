@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>SSP.Activation</RootNamespace>
+    <AssemblyName>SSP.Activation</AssemblyName>
+    <Description>Cryptographic licensing subsystem for the SSP (Secure Session Protocol) product. Zero external dependencies; signature verification, canonicalization, validation pipeline, enforcement and lockdown are self-contained.</Description>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>
