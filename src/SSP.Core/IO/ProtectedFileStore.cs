@@ -5,6 +5,7 @@
 //   - .sysdata.bin
 //   - .runtime.dat
 //   - .index.dat
+//   - .license-state.dat   (activation anti-rollback state; see SspLicenseStateStore)
 //
 // Production Windows builds use DPAPI (ProtectedData) with LocalMachine
 // scope so data written during SETUP MODE remains readable by the Windows
@@ -18,9 +19,9 @@ using System.Text;
 namespace SSP.Core.IO;
 
 /// <summary>
-/// Low-level storage wrapper for the four SSP files that must be encrypted
-/// at rest. Callers still work with the exact same logical UTF-8 text they
-/// used before; only the bytes persisted on disk are protected.
+/// Low-level storage wrapper for the SSP files that must be encrypted at
+/// rest. Callers still work with the exact same logical UTF-8 text they used
+/// before; only the bytes persisted on disk are protected.
 /// </summary>
 public static class ProtectedFileStore
 {
@@ -42,6 +43,7 @@ public static class ProtectedFileStore
         ".sysdata.bin",
         ".runtime.dat",
         ".index.dat",
+        ".license-state.dat",
     };
 
     private static readonly object NonWindowsKeyLock = new();
@@ -53,9 +55,8 @@ public static class ProtectedFileStore
         bool WasPlaintextProtectedFile);
 
     /// <summary>
-    /// True only for the four service state files covered by the
-    /// encrypted-at-rest requirement. Other SSP files keep their existing
-    /// storage format.
+    /// True only for the SSP state files covered by the encrypted-at-rest
+    /// requirement. Other SSP files keep their existing storage format.
     /// </summary>
     public static bool IsProtectedPath(string path)
     {
