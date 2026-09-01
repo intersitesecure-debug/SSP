@@ -29,7 +29,15 @@ public sealed class SspInstallationIdentityProvider : SSP.Activation.IInstallati
     private const int RegQueryBufferBytes = 4096;
     private const uint RegSz = 1u;
 
-    private static readonly IntPtr HkeyLocalMachine = (IntPtr)(long)0x80000002;
+    // HKEY_LOCAL_MACHINE. WinReg.h defines the predefined registry handles as
+    // sign-extended 32-bit values: ((HKEY)(ULONG_PTR)((LONG)0x80000002)). The
+    // int cast inside unchecked() reproduces exactly that: it yields
+    // 0x80000002 on 32-bit and the sign-extended 0xFFFFFFFF80000002 on x64,
+    // which is the canonical pseudo-handle advapi32 expects on 64-bit
+    // Windows. (A plain (IntPtr)(long)0x80000002 would zero-extend on x64 to
+    // 0x0000000080000002 - not a predefined key - and the constant
+    // long->nint conversion also raises CS8778 for 32-bit targets.)
+    private static readonly IntPtr HkeyLocalMachine = new(unchecked((int)0x80000002));
     private const uint KeyQueryValue = 0x0001;
 
     private readonly object _gate = new();

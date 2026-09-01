@@ -12,4 +12,31 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
+  <!--
+    SSP integration note (this property intentionally diverges from the
+    vendored reference copy in _reference/SSP.Activation, which is never
+    modified): every project that rides into SSP.Server's single-file
+    bundles (SSP.Core, SSP.Client, SSP.Server, SSP.ServiceHost) embeds its
+    PDB into the assembly with DebugType=embedded, and SSP.Server's
+    recursive PublishClientTemplate / PublishServiceHostTemplate targets
+    additionally re-build the whole reference graph mid-build with
+    /p:DebugType=embedded as a GLOBAL property.
+
+    If this project used the SDK default (portable), the outer build would
+    first produce SSP.Activation.pdb, and the nested publish would then
+    re-compile SSP.Activation in the same output path with an embedded PDB
+    and IncrementalClean would delete the .pdb file - after the consuming
+    projects' ResolveAssemblyReferences had already recorded it as a
+    copy-local related file. The copy then fails with
+    MSB3030 "Could not copy ... SSP.Activation.pdb ... it was not found".
+
+    Setting DebugType=embedded here makes the artifact set identical in
+    every build context (outer build, nested publish, tests): one DLL,
+    never a loose PDB, so nothing can expect or delete one. It also keeps
+    the published single-file SSP.Server.exe genuinely single-file.
+  -->
+  <PropertyGroup>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
 </Project>
