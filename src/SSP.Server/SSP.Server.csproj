@@ -107,6 +107,11 @@
   <ItemGroup>
     <ProjectReference Include="..\SSP.Core\SSP.Core.csproj" />
     <ProjectReference Include="..\SSP.Client\SSP.Client.csproj" />
+    <!-- Activation adapters (identity, DPAPI state store, event sink, trust
+         anchor) implement the SSP.Activation interfaces. The library is
+         BCL-only and rides into the server/service-host single-file bundles
+         without native-extract or publish-target impact. -->
+    <ProjectReference Include="..\SSP.Activation\SSP.Activation.csproj" />
   </ItemGroup>
 
   <!--

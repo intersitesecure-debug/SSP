@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\src\SSP.Core\SSP.Core.csproj" />
     <ProjectReference Include="..\..\src\SSP.Client\SSP.Client.csproj" />
     <ProjectReference Include="..\..\src\SSP.Server\SSP.Server.csproj" />
+    <ProjectReference Include="..\..\src\SSP.Activation\SSP.Activation.csproj" />
     <!-- The standalone service host: the tests verify its mode gate, and
          referencing it guarantees the host project builds in the solution
          test run even though nothing embeds its publish output here. -->
