@@ -279,6 +279,50 @@ public sealed class ClientConnectionRootTests
         }
     }
 
+    /// <summary>
+    /// <c>GetCanonicalProductRoot()</c> is the override-free accessor: it keeps
+    /// returning the real machine-wide product root even while
+    /// <c>SSP_CLIENT_ROOT</c> redirects <c>GetProductRoot()</c> and the
+    /// connections root that rides on it. The activation licensing root resolves
+    /// against this accessor, so redirecting client connection state can never
+    /// relocate licensing state (which has its own SSP_LICENSE_ROOT seam).
+    /// </summary>
+    [Fact]
+    public void ClientInstallPaths_CanonicalRoot_IgnoresTheClientOverride()
+    {
+        var previous = Environment.GetEnvironmentVariable(
+            ClientInstallPaths.EnvironmentRootOverrideVariable);
+        Environment.SetEnvironmentVariable(
+            ClientInstallPaths.EnvironmentRootOverrideVariable, null);
+        try
+        {
+            var canonical = ClientInstallPaths.GetCanonicalProductRoot();
+
+            // With no override, both accessors agree.
+            Assert.Equal(canonical, ClientInstallPaths.GetProductRoot());
+
+            var custom = Path.Combine(
+                Path.GetTempPath(), "canonical-check-" + Guid.NewGuid().ToString("N"));
+            Environment.SetEnvironmentVariable(
+                ClientInstallPaths.EnvironmentRootOverrideVariable, custom);
+
+            // With the override, the client-state accessors follow it verbatim...
+            Assert.Equal(custom, ClientInstallPaths.GetProductRoot());
+            Assert.Equal(
+                Path.Combine(custom, ClientInstallPaths.ConnectionsDirectoryName),
+                ClientInstallPaths.GetConnectionsRoot());
+
+            // ...and the canonical accessor does not.
+            Assert.Equal(canonical, ClientInstallPaths.GetCanonicalProductRoot());
+            Assert.NotEqual(ClientInstallPaths.GetCanonicalProductRoot(), ClientInstallPaths.GetProductRoot());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(
+                ClientInstallPaths.EnvironmentRootOverrideVariable, previous);
+        }
+    }
+
     // ────────────────────────────────────────────────────────────────
     // Helpers
     // ────────────────────────────────────────────────────────────────
