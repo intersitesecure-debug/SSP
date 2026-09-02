@@ -109,14 +109,15 @@ internal static class ClientInstallationBootstrapper
 
         try
         {
-            if (!IsClientExecutableName(Path.GetFileName(launchedPath)))
+            var normalizedLaunchedPath = NormalizeDirectorySeparators(launchedPath);
+            if (!IsClientExecutableName(Path.GetFileName(normalizedLaunchedPath)))
             {
                 // Framework-dependent `dotnet SSP.Client.dll` runs and
                 // foreign executables must not be copied.
                 return false;
             }
 
-            var directory = Path.GetDirectoryName(Path.GetFullPath(launchedPath));
+            var directory = Path.GetDirectoryName(Path.GetFullPath(normalizedLaunchedPath));
             return !PathsEqual(directory, canonicalDirectory);
         }
         catch
@@ -144,7 +145,7 @@ internal static class ClientInstallationBootstrapper
     /// </summary>
     internal static string DeriveShortcutName(string fileName)
     {
-        var name = Path.GetFileName(fileName);
+        var name = Path.GetFileName(NormalizeDirectorySeparators(fileName));
         var withoutExtension = name;
         if (name.EndsWith(ExecutableExtension, StringComparison.OrdinalIgnoreCase))
             withoutExtension = name[..^ExecutableExtension.Length];
@@ -242,12 +243,15 @@ internal static class ClientInstallationBootstrapper
         if (string.IsNullOrWhiteSpace(firstPath) || string.IsNullOrWhiteSpace(secondPath))
             return false;
 
-        var first = Path.GetFullPath(firstPath)
+        var first = Path.GetFullPath(NormalizeDirectorySeparators(firstPath))
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var second = Path.GetFullPath(secondPath)
+        var second = Path.GetFullPath(NormalizeDirectorySeparators(secondPath))
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         return string.Equals(first, second, StringComparison.OrdinalIgnoreCase);
     }
+
+    private static string NormalizeDirectorySeparators(string path) =>
+        path.Replace(Path.DirectorySeparatorChar == '/' ? '\\' : '/', Path.DirectorySeparatorChar);
 
     /// <summary>
     /// Saves to a same-directory temporary link then replaces the visible
