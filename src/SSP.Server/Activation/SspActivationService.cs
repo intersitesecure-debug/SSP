@@ -1,5 +1,4 @@
 // File: src/SSP.Server/Activation/SspActivationService.cs
-//
 // THE SINGLE AUTHORITATIVE ACTIVATION COMPOSITION ROOT for SSP.
 //
 // This type is the only place in SSP where the activation runtime is
@@ -16,8 +15,7 @@
 //   ILicensePolicy                <- DefaultLicensePolicy
 //   LicenseManager                <- constructed with every component above;
 //                                    it creates the LicenseValidator with the
-//                                    same wired components (anchor, options,
-//                                    clock, identity, state store, revocation
+//                                    same wired components (anchor, options, clock, identity, state store, revocation
 //                                    checker, event sink)
 //   LicenseEnforcement            <- facade over the manager
 //
@@ -36,6 +34,8 @@
 // trust anchor (SspTrustAnchor.Create throws otherwise). There is no
 // unmanaged-permissive mode and no environment/config bypass in this layer.
 
+using System.Threading;
+using System.Threading.PeriodicTimer;
 using System.Text;
 using SSP.Activation;
 using SSP.Core.Activation;
@@ -56,6 +56,8 @@ public sealed class SspActivationService : IDisposable
     private readonly ISecurityEventSink _eventSink;
     private readonly ILicenseStateStore _stateStore;
     private readonly ILicenseProvider _licenseProvider;
+    private readonly TimeSpan _revalidationInterval = TimeSpan.FromMinutes(30);
+    private PeriodicTimer? _revalidationTimer;
 
     private SspActivationService(
         SspLicensePaths paths,
@@ -225,10 +227,69 @@ public sealed class SspActivationService : IDisposable
     public LicenseValidationResult Revalidate() => Manager.Revalidate();
 
     /// <summary>
-    /// Human-readable, secret-free status report for operators and
-    /// diagnostics. Contains only identifiers, paths and reason codes - never
-    /// keys, signatures or credentials.
+    /// Starts a periodic revalidation timer that periodically calls <see cref="Revalidate"/>
+    /// to detect license state changes (expiry, revocation, etc.). The timer runs on a
+    /// background thread and transitions the runtime to <see cref="LicenseState.LockedDown"/>
+    /// if revalidation fails. The timer is stopped automatically on <see cref="Dispose"/>.
     /// </summary>
+    /// <remarks>
+    /// The revalidation interval is 30 minutes by default, configurable through the
+    /// <see cref="_revalidationInterval"/> field. This interval balances the need to detect
+    /// license expiration/revocation promptly against the desire to not add unnecessary
+    /// overhead or wake locks on process shutdown.
+    ///
+    /// The timer uses <see cref="PeriodicTimer"/> and <see cref="Task.Run"/> so that
+    /// it does not block shutdown and does not create unobserved background exceptions.
+    /// If the timer body throws, the error is logged and the timer continues running.
+    /// </remarks>
+    public void StartRevalidationTimer()
+    {
+        // If a timer is already running, do not start another (prevents concurrent loops).
+        if (_revalidationTimer is not null) return;
+
+        _revalidationTimer = new PeriodicTimer(_revalidationInterval);
+        _ = Task.Run(async delegate
+        {
+            try
+            {
+                while (_revalidationTimer is not null && await _revalidationTimer.WaitForNextTickAsync())
+                {
+                    try
+                    {
+                        Manager.Revalidate();
+                    }
+                    catch (Exception ex)
+                    {
+                        // The timer must not produce unobserved background exceptions.
+                        Console.Error.WriteLine($"[activation] Revalidation timer error: {ex.Message}");
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected on shutdown; ignore.
+            }
+        });
+    }
+
+    /// <summary>Stops the periodic revalidation timer if running.</summary>
+    private void StopRevalidationTimer()
+    {
+        if (_revalidationTimer is not null)
+        {
+            _revalidationTimer.Dispose();
+            _revalidationTimer = null;
+        }
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        StopRevalidationTimer();
+        _trustAnchor.Dispose();
+    }
+
+    /// <summary>Human-readable, secret-free status report for operators and diagnostics.</summary>
     public string DescribeStatus()
     {
         var result = Manager.LastValidationResult;
@@ -268,9 +329,6 @@ public sealed class SspActivationService : IDisposable
         builder.AppendLine($"  Security log       : {Path.Combine(Paths.SecurityLogDirectory, SspSecurityEventSink.LogFileName)}");
         return builder.ToString();
     }
-
-    /// <inheritdoc />
-    public void Dispose() => _trustAnchor.Dispose();
 
     private string SafeIdentity()
     {
