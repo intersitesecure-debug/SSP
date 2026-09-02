@@ -314,11 +314,14 @@ public class SspLicensePathsTests
                 "A trailing directory separator must be normalized away.");
 
             // Redundant separators and a trailing one must not change the result.
+            // Both Windows directory separators are covered ('\' natively and
+            // '/' as the accepted alias that GetFullPath normalizes away).
             var sep = Path.DirectorySeparatorChar;
             string[] spellings =
             {
                 dir + sep,
                 dir + sep + sep,
+                dir + Path.AltDirectorySeparatorChar,
                 Path.Combine(dir, "."),
                 Path.Combine(dir, "nested", ".."),
             };
