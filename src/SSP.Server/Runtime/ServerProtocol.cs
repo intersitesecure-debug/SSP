@@ -10,8 +10,31 @@
 //      After enrollment the client may close without a session key
 //      (startup enrollment); that is a successful no-tunnel outcome.
 //
-// The class holds no per-connection state (every connection creates a
-// fresh ServerProtocol) so it is safe to call from multiple threads.
+// One instance per connection (ServerGateway creates a fresh one for every
+// accepted socket), so the mutable state it holds - the license admission this
+// connection reserved - belongs to exactly one connection. Instances must not be
+// shared between connections.
+//
+// LICENSING (P3) - the authorized order is:
+//
+//     client connects
+//         -> server challenge (ServerNonce + RSA signature)
+//         -> client signature verification (OTT hash + client-nonce signature,
+//            or fingerprint + challenge signature)
+//         -> identity authorization (the presenter is a known/authorized client)
+//         -> LICENSE authorization (ISspLicenseGate)          <-- here
+//         -> session key accepted / tunnel becomes active
+//
+//   The license decision is taken AFTER identity authorization on purpose:
+//   reserving a licensed slot (max_concurrent_tunnels /
+//   max_concurrent_sessions) for an anonymous peer would let an
+//   unauthenticated caller exhaust the license and deny service to real
+//   clients. It is taken BEFORE the outcome is sent and before any session key
+//   is accepted, so a denied connection can never become an active tunnel.
+//
+//   No licensing state is cached here: every decision is a live call into the
+//   gate, which consults the LicenseManager under the manager's own lock, so a
+//   Valid -> LockedDown transition denies the next connection immediately.
 
 using System.Collections.Concurrent;
 using System.Net.Sockets;
@@ -21,10 +44,11 @@ using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
 using SSP.Core.Protocol;
+using SSP.Server.Activation;
 
 namespace SSP.Server.Runtime;
 
-public sealed class ServerProtocol
+public sealed class ServerProtocol : IDisposable
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> EnrollmentLocks = new(StringComparer.OrdinalIgnoreCase);
 
@@ -32,15 +56,56 @@ public sealed class ServerProtocol
     private readonly RSA _serverPrivateKey;
     private readonly string _serverPublicKeyPem;
     private readonly string _serviceDir;
-    private readonly ILicenseEnforcement? _enforcement;
+    private readonly ISspLicenseGate _license;
 
-    public ServerProtocol(ServiceConfig config, RSA serverPrivateKey, string serverPublicKeyPem, string serviceDir, ILicenseEnforcement? enforcement = null)
+    /// <summary>
+    /// The license slot reserved for this connection, held until
+    /// <see cref="TakeTunnelAdmission"/> transfers it to the gateway or
+    /// <see cref="Dispose"/> releases it. Never both.
+    /// </summary>
+    private SspTunnelAdmission? _heldAdmission;
+
+    /// <param name="license">
+    /// The mandatory licensing gate for this service. Never null: a protected
+    /// protocol handler without one would be a fail-open path.
+    /// </param>
+    public ServerProtocol(
+        ServiceConfig config,
+        RSA serverPrivateKey,
+        string serverPublicKeyPem,
+        string serviceDir,
+        ISspLicenseGate license)
     {
-        _config = config;
-        _serverPrivateKey = serverPrivateKey;
-        _serverPublicKeyPem = serverPublicKeyPem;
-        _serviceDir = serviceDir;
-        _enforcement = enforcement;
+        _config = config ?? throw new ArgumentNullException(nameof(config));
+        _serverPrivateKey = serverPrivateKey ?? throw new ArgumentNullException(nameof(serverPrivateKey));
+        _serverPublicKeyPem = serverPublicKeyPem ?? throw new ArgumentNullException(nameof(serverPublicKeyPem));
+        _serviceDir = serviceDir ?? throw new ArgumentNullException(nameof(serviceDir));
+        _license = license ?? throw new ArgumentNullException(
+            nameof(license),
+            "A protected SSP protocol handler requires a licensing gate. Production callers obtain one " +
+            "from SspRuntimeLicense.CreateForService; tests must pass an explicit gate.");
+    }
+
+    /// <summary>
+    /// Transfers ownership of this connection's reserved license slot to the
+    /// caller (the gateway, which releases it when the tunnel ends) and clears
+    /// it here so <see cref="Dispose"/> cannot release it a second time.
+    /// Returns null when no tunnel was authorized on this connection
+    /// (enrollment-only sockets, and every denial).
+    /// </summary>
+    public SspTunnelAdmission? TakeTunnelAdmission()
+    {
+        var admission = _heldAdmission;
+        _heldAdmission = null;
+        return admission;
+    }
+
+    /// <summary>Releases any license slot still held by this connection.</summary>
+    public void Dispose()
+    {
+        var admission = _heldAdmission;
+        _heldAdmission = null;
+        admission?.Dispose();
     }
 
     /// <summary>
@@ -172,6 +237,42 @@ public sealed class ServerProtocol
         // Compute the fingerprint early so we can display it on the
         // server console alongside the Authentication Code.
         var fingerprint = RsaCrypto.ComputePublicKeyFingerprint(clientRsa);
+
+        // EP2 - max_clients. Enrolling a client grows .index.dat, which is the
+        // authoritative count of licensed clients for this service, so this is
+        // the exact point where the limit must be measured.
+        //
+        // Concurrency: the count is read inside the per-service enrollment
+        // semaphore (taken in HandleEnrollmentAsync) and inside the
+        // cross-process ServiceConfigFileLock region taken above, which is the
+        // same pair of locks that guards every write to .index.dat. Two
+        // concurrent enrollments therefore cannot both observe the same "one
+        // client slot left" state - the check and the commit are serialized.
+        //
+        // Ordering is deliberate. The check runs AFTER the presenter has proven
+        // possession of a valid One-Time Token and signed the client nonce, and
+        // BEFORE the Authentication Code is generated, before anything is
+        // written to disk and before the token is consumed. A licensing denial
+        // therefore (a) never leaks the license state to a caller that has not
+        // presented valid credentials, and (b) leaves the OTT intact so the
+        // operator can retry once the license allows it.
+        var reEnrollsExistingClient = users.Users.Any(u =>
+            string.Equals(u.ClientPublicKeyFingerprint, fingerprint, StringComparison.Ordinal));
+
+        // Usage is measured BEFORE the grant (the library's convention). A
+        // re-enrollment of an already-authorized fingerprint replaces its entry
+        // instead of growing the set, so it must not count against itself.
+        var currentAuthorisedClients = reEnrollsExistingClient
+            ? Math.Max(0, users.Users.Count - 1)
+            : users.Users.Count;
+
+        var clientDecision = _license.CanEnrollClient(currentAuthorisedClients);
+        if (!clientDecision.IsAllowed)
+        {
+            await SendOutcomeAsync(stream, false, "enrollment not permitted", ct).ConfigureAwait(false);
+            throw new UnauthorizedAccessException(
+                $"License does not permit enrolling another client ({clientDecision.ReasonCode}).");
+        }
 
         // Step 9: generate the AuthenticationCode. Per spec §12 / §16 the
         // One-Time Token hash is invalidated ONLY after the enrollment has
@@ -342,19 +443,52 @@ public sealed class ServerProtocol
             throw new UnauthorizedAccessException("Challenge signature verification failed.");
         }
 
-        // EP3 — Tunnel establishment license gate:
-        // The client has been authenticated (fingerprint + challenge signature),
-        // but the license must also permit tunnel establishment.
-        // Fail closed: if the enforcement policy denies, do not establish the tunnel.
-        if (_enforcement is not null && !_enforcement.CanEstablishTunnel(0).IsAllowed)
+        // EP1 + EP2 + EP3 - the tunnel/session admission.
+        //
+        // The client is authenticated (its fingerprint is in .index.dat with
+        // IsAuthorized, and its signature over THIS connection's server nonce
+        // verified), so identity authorization has already succeeded. The
+        // license must now independently permit the protected operation. The
+        // gate reserves the max_concurrent_tunnels and
+        // max_concurrent_sessions slots atomically with the decision, so two
+        // connections racing for the last slot cannot both be admitted; the
+        // reservation is held here and either adopted by the gateway
+        // (TakeTunnelAdmission) or released by Dispose.
+        //
+        // Fail closed: on denial nothing is sent back that could be turned into
+        // a session key, no slot is consumed, and the connection is refused.
+        var admission = _license.AdmitTunnel();
+        if (!admission.IsAdmitted)
         {
-            await SendOutcomeAsync(stream, false, "License does not permit tunnel establishment", ct);
-            throw new UnauthorizedAccessException("License does not permit tunnel establishment.");
+            admission.Dispose();
+            await SendOutcomeAsync(
+                stream,
+                false,
+                "server licensing does not permit this connection",
+                ct).ConfigureAwait(false);
+            throw new UnauthorizedAccessException(
+                $"License does not permit tunnel establishment ({admission.ReasonCode}).");
         }
 
+        // Exactly one admission per connection; a previous one would mean this
+        // handler ran twice on the same instance, which the gateway never does.
+        _heldAdmission?.Dispose();
+        _heldAdmission = admission;
+
         await SendOutcomeAsync(stream, true, "You verified", ct);
-        return await ReceiveSessionKeyAsync(stream, ct, allowEof: false)
-            ?? throw new IOException("Client closed before sending SessionKeyOffer.");
+        try
+        {
+            return await ReceiveSessionKeyAsync(stream, ct, allowEof: false)
+                ?? throw new IOException("Client closed before sending SessionKeyOffer.");
+        }
+        catch
+        {
+            // The tunnel never became active, so give the licensed slot back
+            // here rather than waiting for the gateway to notice.
+            _heldAdmission?.Dispose();
+            _heldAdmission = null;
+            throw;
+        }
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -375,6 +509,46 @@ public sealed class ServerProtocol
         }
         if (msg is not SessionKeyOfferMessage offer)
             throw new InvalidDataException($"Expected SessionKeyOffer, got {msg.Type}.");
+
+        // EP3 - SINGLE CHOKE POINT for every path that can produce an active
+        // protected tunnel.
+        //
+        // A session key is what turns an authenticated connection into a data
+        // plane: ServerGateway bridges traffic as soon as HandleAsync returns a
+        // non-empty key. Both handlers reach that point through this method, so
+        // this is where the license admission has to be guaranteed:
+        //
+        //   • future authorization already holds an admission, taken before the
+        //     AuthorizationOutcome was sent (see HandleFutureAuthorizationAsync),
+        //     so it is not taken twice;
+        //   • enrollment reaches here holding none. Without this check an
+        //     enrollment socket that offers a session key (which is exactly what
+        //     ClientProtocol.ConnectAndAuthenticateAsync does with
+        //     establishSessionKey: true) would open a fully authenticated,
+        //     fully encrypted tunnel with NO licensing decision at all - an
+        //     alternate path around EP3.
+        //
+        // On denial the offer is refused with the protocol's own
+        // SessionKeyAck(Accepted=false), which the client already handles as a
+        // rejection, and no tunnel is created. Nothing is decrypted: the offer
+        // is refused before the RSA-OAEP unwrap, so a denied connection cannot
+        // even cause session-key material to be processed.
+        if (_heldAdmission is null)
+        {
+            var admission = _license.AdmitTunnel();
+            if (!admission.IsAdmitted)
+            {
+                admission.Dispose();
+                await MessageWire.WriteAsync(
+                    stream, new SessionKeyAckMessage { Accepted = false }, ct).ConfigureAwait(false);
+                Console.Error.WriteLine(
+                    $"[license] data-plane session denied ({admission.ReasonCode}); " +
+                    "refusing the session key offer.");
+                return null;
+            }
+
+            _heldAdmission = admission;
+        }
 
         var wrapped = Convert.FromBase64String(offer.WrappedSessionKeyB64);
         var sessionKey = RsaCrypto.DecryptOaep(_serverPrivateKey, wrapped);

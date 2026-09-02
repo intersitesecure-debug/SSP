@@ -46,6 +46,7 @@ using SSP.Core.Models;
 using SSP.Server.Runtime;
 using SSP.Server.ServiceHost;
 using SSP.Server.Setup;
+using SSP.Tests.Helpers;
 using Xunit;
 
 namespace SSP.Tests;
@@ -369,7 +370,7 @@ public class ServiceStartRegressionTests
 
         using var rsa = RsaCrypto.GenerateKeyPair();
         var pubPem = RsaCrypto.ExportPublicKeyPem(rsa);
-        var gateway = new ServerGateway(config, rsa, pubPem, "/tmp");
+        var gateway = new ServerGateway(config, rsa, pubPem, "/tmp", UnlicensedTestGate.Instance);
 
         using var cts = new CancellationTokenSource();
         var runTask = gateway.RunAsync(cts.Token);
@@ -412,7 +413,7 @@ public class ServiceStartRegressionTests
 
         using var rsa = RsaCrypto.GenerateKeyPair();
         var pubPem = RsaCrypto.ExportPublicKeyPem(rsa);
-        var gateway = new ServerGateway(config, rsa, pubPem, "/tmp");
+        var gateway = new ServerGateway(config, rsa, pubPem, "/tmp", UnlicensedTestGate.Instance);
 
         using var cts = new CancellationTokenSource();
         var runTask = gateway.RunAsync(cts.Token);

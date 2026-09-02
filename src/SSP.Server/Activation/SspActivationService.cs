@@ -33,6 +33,13 @@
 // Fail-closed by construction: the production factory requires a compiled-in
 // trust anchor (SspTrustAnchor.Create throws otherwise). There is no
 // unmanaged-permissive mode and no environment/config bypass in this layer.
+//
+// Phase 3 (runtime enforcement): SspRuntimeLicense wraps this composition root
+// and is the single ISspLicenseGate the server runtime consumes. This type owns
+// the licensing lifetime (manager, validator, adapters, periodic refresh); it
+// deliberately starts NO background work from its constructor or from Create() -
+// the caller that owns the service lifetime calls StartRevalidationTimer()
+// explicitly, once the runtime has been proven licensed.
 
 using System.Text;
 using System.Threading;
@@ -56,7 +63,6 @@ public sealed class SspActivationService : IDisposable
     private readonly ILicenseStateStore _stateStore;
     private readonly ILicenseProvider _licenseProvider;
     private readonly object _revalidationTimerGate = new();
-    private readonly TimeSpan _revalidationInterval = TimeSpan.FromMinutes(30);
     private PeriodicTimer? _revalidationTimer;
     private CancellationTokenSource? _revalidationCancellation;
     private Task? _revalidationTask;
@@ -123,12 +129,31 @@ public sealed class SspActivationService : IDisposable
     public LicenseManager Manager { get; }
 
     /// <summary>
-    /// Headless enforcement facade over <see cref="Manager"/>. The later
-    /// enforcement phase calls the protected-operation methods on this facade
-    /// from the server control-plane seams. Phase 3 wires it only; nothing
-    /// calls it in a runtime path yet.
+    /// Headless enforcement facade over <see cref="Manager"/>. This is the only
+    /// licensing decision surface SSP runtime code may consult (through
+    /// <see cref="SspRuntimeLicense"/>); every call is evaluated live against
+    /// the manager's current state under the manager's own gate.
     /// </summary>
     public LicenseEnforcement Enforcement { get; }
+
+    /// <summary>
+    /// Default period between license refreshes. Long enough that the RSA
+    /// re-verification and the file read are noise, short enough that an expiry
+    /// or a newly installed renewal license is noticed without a restart.
+    /// </summary>
+    public static readonly TimeSpan DefaultRevalidationInterval = TimeSpan.FromMinutes(30);
+
+    /// <summary>True while the periodic license refresh loop is running.</summary>
+    public bool IsRevalidationTimerRunning
+    {
+        get
+        {
+            lock (_revalidationTimerGate)
+            {
+                return _revalidationTask is not null && !_disposed;
+            }
+        }
+    }
 
     /// <summary>Current runtime state of the activation subsystem.</summary>
     public LicenseState CurrentState => Manager.CurrentState;
@@ -230,23 +255,49 @@ public sealed class SspActivationService : IDisposable
     public LicenseValidationResult Revalidate() => Manager.Revalidate();
 
     /// <summary>
-    /// Starts a periodic revalidation timer that periodically calls <see cref="Revalidate"/>
-    /// to detect license state changes (expiry, revocation, etc.). The timer runs on a
-    /// background thread and transitions the runtime to <see cref="LicenseState.LockedDown"/>
-    /// if revalidation fails. The timer is stopped automatically on <see cref="Dispose"/>.
+    /// Starts the periodic license refresh loop. Explicit, idempotent and owned
+    /// by the caller that owns the service lifetime: no background work is ever
+    /// started from a constructor, from <see cref="Create"/> or from
+    /// <see cref="Compose"/>, so composing an activation runtime for a one-shot
+    /// status query never leaves a timer behind.
     /// </summary>
+    /// <param name="interval">
+    /// Refresh period; defaults to <see cref="DefaultRevalidationInterval"/>.
+    /// Must be positive.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="interval"/> is not positive.</exception>
+    /// <exception cref="ObjectDisposedException">This service has been disposed.</exception>
     /// <remarks>
-    /// The revalidation interval is 30 minutes by default, configurable through the
-    /// <see cref="_revalidationInterval"/> field. This interval balances the need to detect
-    /// license expiration/revocation promptly against the desire to not add unnecessary
-    /// overhead or wake locks on process shutdown.
+    /// Each tick calls <see cref="RefreshLicense"/>, which re-reads the license
+    /// artifact through the wired provider and re-runs the full validation
+    /// pipeline. That is deliberately <c>Load()</c> and not
+    /// <see cref="Revalidate"/>: <c>Revalidate()</c> re-checks only the artifact
+    /// already held in memory, so it can detect expiry but can never notice a
+    /// renewed or superseding license file - and clearing a lockdown requires
+    /// loading a valid artifact (reference ARCHITECTURE §8).
     ///
-    /// The timer uses <see cref="PeriodicTimer"/> and <see cref="Task.Run"/> so that
-    /// it does not block shutdown and does not create unobserved background exceptions.
-    /// If the timer body throws, the error is logged and the timer continues running.
+    /// Lifecycle guarantees:
+    ///   • exactly one loop - Start is idempotent under <c>_revalidationTimerGate</c>;
+    ///   • no overlapping refreshes - the loop awaits the tick, then calls the
+    ///     (synchronous) refresh, then awaits the next tick;
+    ///   • no unobserved task exceptions - the loop body catches everything and
+    ///     the task is retained and joined by <see cref="Dispose"/>;
+    ///   • no timer after shutdown - <see cref="Dispose"/> cancels, disposes the
+    ///     <see cref="PeriodicTimer"/>, joins the loop and marks the service
+    ///     disposed, after which Start throws;
+    ///   • no stale "Valid" cache anywhere - every gate consults
+    ///     <see cref="Enforcement"/>, which reads the manager's state under the
+    ///     manager's own gate at call time.
     /// </remarks>
-    public void StartRevalidationTimer()
+    public void StartRevalidationTimer(TimeSpan? interval = null)
     {
+        var resolvedInterval = interval ?? DefaultRevalidationInterval;
+        if (resolvedInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(interval), resolvedInterval, "The license refresh interval must be positive.");
+        }
+
         lock (_revalidationTimerGate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -255,7 +306,7 @@ public sealed class SspActivationService : IDisposable
             if (_revalidationTask is not null)
                 return;
 
-            var timer = new PeriodicTimer(_revalidationInterval);
+            var timer = new PeriodicTimer(resolvedInterval);
             var cancellation = new CancellationTokenSource();
 
             _revalidationTimer = timer;
@@ -273,14 +324,22 @@ public sealed class SspActivationService : IDisposable
         {
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
                 try
                 {
-                    Revalidate();
+                    RefreshLicense();
                 }
                 catch (Exception ex)
                 {
                     // A transient provider or validation failure must not fault
-                    // the owned background task or stop later revalidations.
+                    // the owned background task or stop later refreshes. The
+                    // licensing state itself is untouched by a throw here: the
+                    // manager keeps the last authoritative state, and every gate
+                    // keeps consulting it.
                     ReportRevalidationTimerError(ex);
                 }
             }
@@ -297,11 +356,32 @@ public sealed class SspActivationService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Re-read the license artifact through the wired provider and re-run the
+    /// full validation pipeline. Detects expiry, revocation, tampering, a
+    /// deleted artifact and a newly installed renewal (which is the only way a
+    /// lockdown is cleared). Falls back to <see cref="Revalidate"/> if the
+    /// manager has no provider, which cannot happen in an SSP composition.
+    /// </summary>
+    public LicenseValidationResult RefreshLicense()
+    {
+        try
+        {
+            return Manager.Load();
+        }
+        catch (InvalidOperationException)
+        {
+            // No provider configured (never the case for Create/Compose, whose
+            // provider argument is mandatory): re-check the held artifact.
+            return Manager.Revalidate();
+        }
+    }
+
     private static void ReportRevalidationTimerError(Exception ex)
     {
         try
         {
-            Console.Error.WriteLine($"[activation] Revalidation timer error: {ex.Message}");
+            Console.Error.WriteLine($"[activation] License refresh error: {ex.Message}");
         }
         catch
         {
@@ -310,44 +390,59 @@ public sealed class SspActivationService : IDisposable
         }
     }
 
-    /// <summary>Stops the periodic revalidation timer if running.</summary>
-    private void StopRevalidationTimer()
+    /// <inheritdoc />
+    public void Dispose()
     {
-        var timer = _revalidationTimer;
-        var cancellation = _revalidationCancellation;
-        var task = _revalidationTask;
+        Task? loopToJoin;
+        CancellationTokenSource? cancellationToDispose;
 
-        // Clear the owned references before cancellation. Start cannot race
-        // this method because Dispose holds _revalidationTimerGate and has
-        // already marked the service disposed.
-        _revalidationTimer = null;
-        _revalidationCancellation = null;
-        _revalidationTask = null;
+        lock (_revalidationTimerGate)
+        {
+            if (_disposed)
+                return;
 
-        try
-        {
-            cancellation?.Cancel();
-        }
-        catch (Exception ex)
-        {
-            ReportRevalidationTimerError(ex);
-        }
-        finally
-        {
-            // Disposing PeriodicTimer makes any pending wait complete; the
-            // cancellation token covers the same shutdown path explicitly.
-            timer?.Dispose();
+            _disposed = true;
+
+            loopToJoin = _revalidationTask;
+            cancellationToDispose = _revalidationCancellation;
+            var timer = _revalidationTimer;
+
+            // Clear the owned references before cancellation. Start cannot race
+            // this method because it takes the same gate and now sees _disposed.
+            _revalidationTimer = null;
+            _revalidationCancellation = null;
+            _revalidationTask = null;
+
+            try
+            {
+                cancellationToDispose?.Cancel();
+            }
+            catch (Exception ex)
+            {
+                ReportRevalidationTimerError(ex);
+            }
+            finally
+            {
+                // Disposing PeriodicTimer makes any pending wait complete; the
+                // cancellation token covers the same shutdown path explicitly.
+                try { timer?.Dispose(); }
+                catch (Exception ex) { ReportRevalidationTimerError(ex); }
+            }
         }
 
-        if (task is not null)
+        // Join OUTSIDE the gate: a refresh in flight may be inside the license
+        // manager's own lock doing RSA verification and file I/O, and holding
+        // _revalidationTimerGate across that would serialize unrelated callers
+        // (including a concurrent IsRevalidationTimerRunning read) behind disk
+        // and crypto work. Waiting here is still required: the loop touches the
+        // trust anchor indirectly through the validator, which is disposed below.
+        if (loopToJoin is not null)
         {
             try
             {
-                // Revalidation is synchronous and has no cancellation API, so
-                // wait for an in-flight call before disposing the trust anchor.
-                task.GetAwaiter().GetResult();
+                loopToJoin.GetAwaiter().GetResult();
             }
-            catch (OperationCanceledException) when (cancellation?.IsCancellationRequested == true)
+            catch (OperationCanceledException) when (cancellationToDispose?.IsCancellationRequested == true)
             {
                 // Defensive: the loop normally handles expected cancellation.
             }
@@ -359,21 +454,11 @@ public sealed class SspActivationService : IDisposable
             }
         }
 
-        cancellation?.Dispose();
-    }
+        try { cancellationToDispose?.Dispose(); }
+        catch (Exception ex) { ReportRevalidationTimerError(ex); }
 
-    /// <inheritdoc />
-    public void Dispose()
-    {
-        lock (_revalidationTimerGate)
-        {
-            if (_disposed)
-                return;
-
-            _disposed = true;
-            StopRevalidationTimer();
-            _trustAnchor.Dispose();
-        }
+        try { _trustAnchor.Dispose(); }
+        catch (Exception ex) { ReportRevalidationTimerError(ex); }
 
         GC.SuppressFinalize(this);
     }

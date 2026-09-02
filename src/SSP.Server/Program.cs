@@ -27,9 +27,11 @@
 using System.CommandLine;
 using System.ServiceProcess;
 using System.Text.Json;
+using SSP.Activation;
 using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
+using SSP.Server.Activation;
 using SSP.Server.Runtime;
 using SSP.Server.Setup;
 using SSP.Server.ServiceHost;
@@ -67,12 +69,16 @@ public static class Program
 
         // A foreground server executable first launched outside Program Files
         // is handed off to the canonical executable through its Desktop
-        // shortcut. Keep both SERVICE MODE entry paths out of this flow: the
-        // SCM fast path above and --run-once must retain their existing
-        // lifecycle behaviour.
+        // shortcut. Keep the SERVICE MODE entry paths and the licensing
+        // diagnosis out of this flow: the SCM fast path above and --run-once
+        // must retain their existing lifecycle behaviour, and --license-status
+        // must answer from wherever the operator runs it (that is the whole
+        // point of the diagnosis when a service refuses to start).
         var isRunOnce = args.Length >= 1 &&
             string.Equals(args[0], "--run-once", StringComparison.Ordinal);
-        if (!isRunOnce && ServerInstallationBootstrapper.InstallAndLaunchSetupIfNeeded())
+        var isLicenseStatus = args.Length >= 1 &&
+            string.Equals(args[0], "--license-status", StringComparison.Ordinal);
+        if (!isRunOnce && !isLicenseStatus && ServerInstallationBootstrapper.InstallAndLaunchSetupIfNeeded())
             return 0;
 
         var root = new RootCommand("SSP secure tunneling server");
@@ -112,6 +118,20 @@ public static class Program
             await RunServiceModeAsync(dir, runAsWindowsService: false);
         });
         root.Add(runOnceCmd);
+
+        // Operator licensing diagnosis. Reads and validates the license artifact
+        // and prints a secret-free report; it never starts a protected service.
+        var licenseRootOpt = new Option<string?>(
+            "--license-root",
+            "Optional licensing directory override (defaults to SSP_LICENSE_ROOT, then the canonical product root).");
+        var licenseStatusCmd = new Command("--license-status", "Report the SSP licensing state and exit");
+        licenseStatusCmd.AddOption(licenseRootOpt);
+        licenseStatusCmd.SetHandler(async ctx =>
+        {
+            var licenseRoot = ctx.ParseResult.GetValueForOption(licenseRootOpt);
+            ctx.ExitCode = await RunLicenseStatusAsync(licenseRoot) ? 0 : 1;
+        });
+        root.Add(licenseStatusCmd);
 
         // The Desktop shortcut intentionally has no arguments, so a direct
         // launch from the canonical executable location enters the existing
@@ -196,7 +216,11 @@ public static class Program
             };
         }
 
-        var engine = new SetupEngine();
+        // EP0a/EP0b: provisioning-time licensing pre-checks. Null in a build with
+        // no compiled-in trust anchor - the runtime gates (EP1/EP2/EP3) remain
+        // unconditional either way.
+        using var provisioningLicense = SspRuntimeLicense.TryCreateForProvisioning(p.ApplicationName);
+        var engine = new SetupEngine(provisioningLicense);
         try
         {
             await engine.RunAsync(p);
@@ -216,7 +240,11 @@ public static class Program
         var p = JsonSerializer.Deserialize<SetupParameters>(json, JsonOptions.Default)
                 ?? throw new InvalidDataException($"Failed to deserialize {jsonFile}.");
 
-        var engine = new SetupEngine();
+        // EP0a/EP0b: same provisioning-time licensing pre-checks as the
+        // interactive path, so ServiceBuilder and batch setup cannot be used to
+        // step around them.
+        using var provisioningLicense = SspRuntimeLicense.TryCreateForProvisioning(p.ApplicationName);
+        var engine = new SetupEngine(provisioningLicense);
         await engine.RunAsync(p);
         PrintSetupResult(engine.Result);
         return engine.Result.Success;
@@ -320,15 +348,85 @@ public static class Program
         var configPath = Path.Combine(serviceDir, ".cache.dat");
         var config = await ServiceConfigStore.LoadAsync(configPath);
 
-        var privPath = Path.Combine(serviceDir, config.ServerPrivateKeyPath);
-        var privPem = await PemStore.LoadPrivateKeyAsync(privPath);
-        using var rsa = RsaCrypto.ImportPrivateKeyPem(privPem);
-        var pubPath = Path.Combine(serviceDir, config.ServerPublicKeyPath);
-        var pubPem = await PemStore.LoadPublicKeyAsync(pubPath);
+        // EP1 - service startup licensing gate. This is the semantically correct
+        // boundary for CanStartProtectedService: ONE protected service instance
+        // is about to become operational. It runs before the keys are imported
+        // and before the gateway (and therefore the listening socket) exists, so
+        // an unlicensed service never binds its port at all.
+        //
+        // Fail closed: CreateForService throws SspActivationException unless this
+        // build has a compiled-in Licensing Authority trust anchor AND the
+        // license validates to Valid AND the protected protocol is in the
+        // licensed feature set AND max_services is not exhausted.
+        SspRuntimeLicense license;
+        try
+        {
+            license = SspRuntimeLicense.CreateForService(config, serviceDir);
+        }
+        catch (SspActivationException ex)
+        {
+            Console.Error.WriteLine($"[activation] {ex.Message}");
+            Console.Error.WriteLine(
+                "[activation] The protected service was NOT started. Install a valid SSP license " +
+                "and restart, or run 'SSP.Server --license-status' for the licensing diagnosis.");
+            ServiceDiagnostics.WriteStartupFailure(serviceDir, ex);
+            throw;
+        }
 
-        var gateway = new ServerGateway(config, rsa, pubPem, serviceDir);
-        using var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, ev) => { ev.Cancel = true; cts.Cancel(); };
-        await gateway.RunAsync(cts.Token);
+        using (license)
+        {
+            var privPath = Path.Combine(serviceDir, config.ServerPrivateKeyPath);
+            var privPem = await PemStore.LoadPrivateKeyAsync(privPath);
+            using var rsa = RsaCrypto.ImportPrivateKeyPem(privPem);
+            var pubPath = Path.Combine(serviceDir, config.ServerPublicKeyPath);
+            var pubPem = await PemStore.LoadPublicKeyAsync(pubPath);
+
+            var gateway = new ServerGateway(config, rsa, pubPem, serviceDir, license);
+            using var cts = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, ev) => { ev.Cancel = true; cts.Cancel(); };
+            await gateway.RunAsync(cts.Token);
+        }
+    }
+
+    /// <summary>
+    /// Operator licensing diagnosis. Composes the activation runtime, reads and
+    /// validates the license artifact and prints a secret-free status report
+    /// (state, reason code, product, installation id, feature/limit summary and
+    /// the paths in use). Never starts a protected service and never starts the
+    /// periodic refresh: this is a one-shot query.
+    /// </summary>
+    private static async Task<bool> RunLicenseStatusAsync(string? licenseRoot)
+    {
+        await Task.CompletedTask;
+
+        try
+        {
+            var paths = SspLicensePaths.Resolve(licenseRoot);
+
+            if (!SspTrustAnchor.IsCompiledIn)
+            {
+                Console.Error.WriteLine("=== SSP LICENSE STATUS ===");
+                Console.Error.WriteLine(
+                    "UNLICENSED BUILD: no Licensing Authority trust anchor is compiled into this " +
+                    "binary (SspTrustAnchor.AuthorityPublicKeyPem is empty).");
+                Console.Error.WriteLine(
+                    "This is fail-closed: no license can validate, so no protected SSP service can " +
+                    "start. Set the authority public key at the release key ceremony and rebuild.");
+                Console.Error.WriteLine($"  License file       : {paths.LicenseFilePath}");
+                Console.Error.WriteLine($"  State store        : {paths.StateStorePath}");
+                Console.Error.WriteLine($"  Security log       : {Path.Combine(paths.SecurityLogDirectory, SspSecurityEventSink.LogFileName)}");
+                return false;
+            }
+
+            using var activation = SspActivationService.Create(paths);
+            activation.Load();
+            Console.WriteLine(activation.DescribeStatus());
+            return activation.CurrentState == LicenseState.Valid;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[activation] license status failed: {ex.Message}");
+            return false;
+        }
     }
 }

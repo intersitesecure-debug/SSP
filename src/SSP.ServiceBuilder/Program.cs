@@ -62,7 +62,15 @@ internal static class Program
                 ClientName             = cName,
             };
 
-            var engine = new SetupEngine();
+            // EP0a/EP0b: the ServiceBuilder creates protected services through
+            // the same engine as SSP.Server SETUP MODE, so it resolves the same
+            // provisioning-time licensing gate. Null in a build with no
+            // compiled-in trust anchor; the runtime gates (EP1/EP2/EP3) remain
+            // unconditional either way, so nothing created here can ever become
+            // operational without a valid license.
+            using var provisioningLicense =
+                SSP.Server.Activation.SspRuntimeLicense.TryCreateForProvisioning(name);
+            var engine = new SetupEngine(provisioningLicense);
             await engine.RunAsync(parameters);
 
             Console.WriteLine();
