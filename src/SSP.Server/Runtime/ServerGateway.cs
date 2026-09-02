@@ -7,6 +7,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using SSP.Activation;
 using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
@@ -20,6 +21,7 @@ public sealed class ServerGateway : IAsyncDisposable
     private readonly string _serviceDir;
     private readonly RSA _serverPrivateKey;
     private readonly string _serverPublicKeyPem;
+    private readonly ILicenseEnforcement? _enforcement;
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
 
@@ -43,12 +45,21 @@ public sealed class ServerGateway : IAsyncDisposable
     /// </summary>
     public Task ListenerReady => _listenerReady.Task;
 
-    public ServerGateway(ServiceConfig config, RSA serverPrivateKey, string serverPublicKeyPem, string serviceDir)
+    public ServerGateway(ServiceConfig config, RSA serverPrivateKey, string serverPublicKeyPem, string serviceDir, ILicenseEnforcement? enforcement = null)
     {
         _config = config;
         _serverPrivateKey = serverPrivateKey;
         _serverPublicKeyPem = serverPublicKeyPem;
         _serviceDir = serviceDir;
+        _enforcement = enforcement;
+        if (enforcement is not null && !enforcement.CanStartProtectedService(0).IsAllowed)
+        {
+            // Enforcement denied even before any client connects — this can happen when
+            // the license state transitions to LockedDown after initial startup but before
+            // the gateway accepts its first connection. Log and remain non-operational
+            // until the license state recoverS (or the process restarts with a valid license).
+            Console.Error.WriteLine($"[gateway] License enforcement denied protected service start: {enforcement.CanStartProtectedService(0).ReasonCode}");
+        }
     }
 
     /// <summary>
@@ -102,6 +113,17 @@ public sealed class ServerGateway : IAsyncDisposable
     {
         try
         {
+            // EP0 — License bootstrap / startup gate:
+            // Ensure licensing is initialized before protected functionality becomes available.
+            // Fail closed: if enforcement is configured and the license state does not permit
+            // protected services, deny the connection rather than silently proceeding.
+            if (_enforcement is not null && !_enforcement.CanStartProtectedService(1).IsAllowed)
+            {
+                Console.Error.WriteLine($"[gateway] Protected operation denied (license state not valid); closing connection.");
+                tcp.Close();
+                return;
+            }
+
             var protocol = new ServerProtocol(_config, _serverPrivateKey, _serverPublicKeyPem, _serviceDir);
             var sessionKey = await protocol.HandleAsync(tcp, ct);
             if (sessionKey is not { Length: > 0 })

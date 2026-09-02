@@ -16,6 +16,7 @@
 using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using SSP.Activation;
 using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
@@ -31,13 +32,15 @@ public sealed class ServerProtocol
     private readonly RSA _serverPrivateKey;
     private readonly string _serverPublicKeyPem;
     private readonly string _serviceDir;
+    private readonly ILicenseEnforcement? _enforcement;
 
-    public ServerProtocol(ServiceConfig config, RSA serverPrivateKey, string serverPublicKeyPem, string serviceDir)
+    public ServerProtocol(ServiceConfig config, RSA serverPrivateKey, string serverPublicKeyPem, string serviceDir, ILicenseEnforcement? enforcement = null)
     {
         _config = config;
         _serverPrivateKey = serverPrivateKey;
         _serverPublicKeyPem = serverPublicKeyPem;
         _serviceDir = serviceDir;
+        _enforcement = enforcement;
     }
 
     /// <summary>
@@ -337,6 +340,16 @@ public sealed class ServerProtocol
         {
             await SendOutcomeAsync(stream, false, "verification failed", ct);
             throw new UnauthorizedAccessException("Challenge signature verification failed.");
+        }
+
+        // EP3 — Tunnel establishment license gate:
+        // The client has been authenticated (fingerprint + challenge signature),
+        // but the license must also permit tunnel establishment.
+        // Fail closed: if the enforcement policy denies, do not establish the tunnel.
+        if (_enforcement is not null && !_enforcement.CanEstablishTunnel(0).IsAllowed)
+        {
+            await SendOutcomeAsync(stream, false, "License does not permit tunnel establishment", ct);
+            throw new UnauthorizedAccessException("License does not permit tunnel establishment.");
         }
 
         await SendOutcomeAsync(stream, true, "You verified", ct);
