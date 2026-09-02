@@ -60,7 +60,11 @@ public sealed record SspLicensePaths
         LicenseDirectory = licenseDirectory;
     }
 
-    /// <summary>Root of the licensing directory (always an absolute path).</summary>
+    /// <summary>
+    /// Root of the licensing directory (always an absolute path in canonical
+    /// form: normalized separators and no trailing directory separator, so
+    /// every spelling of the same directory yields the same value).
+    /// </summary>
     public string LicenseDirectory { get; }
 
     /// <summary>Full path of the signed license artifact read by the license provider.</summary>
@@ -99,6 +103,17 @@ public sealed record SspLicensePaths
     /// <see cref="ClientInstallPaths"/> and <c>AuthenticationCodeFile</c>.
     /// This selects only which directory is read; it can never create
     /// authorization (licensing Invariant 4) — the subsystem stays fail-closed.
+    /// <para>
+    /// The selected root is canonicalized with <see cref="Path.GetFullPath"/>
+    /// (a relative override resolves against the process working directory)
+    /// followed by <see cref="Path.TrimEndingDirectorySeparator"/>, so a
+    /// trailing or redundant directory separator in the override produces the
+    /// same value as the plain spelling: every spelling of one directory
+    /// resolves to one equal <see cref="SspLicensePaths"/> record and one
+    /// identical set of derived file paths (the trailing separator was
+    /// cosmetic for <see cref="Path.Combine"/> file access, but it broke the
+    /// record's value semantics).
+    /// </para>
     /// </remarks>
     public static SspLicensePaths Resolve(string? licenseRootOverride = null)
     {
@@ -114,6 +129,16 @@ public sealed record SspLicensePaths
             root = Path.Combine(ClientInstallPaths.GetCanonicalProductRoot(), LicensingDirectoryName);
         }
 
-        return new SspLicensePaths(Path.GetFullPath(root));
+        // Canonicalize the directory. GetFullPath makes an override absolute (a
+        // relative value resolves against the process working directory) and
+        // normalizes separators and ./.. segments, but it deliberately PRESERVES
+        // a trailing directory separator. Trim that trailing separator away
+        // (root-safely: "C:\", "/" and UNC roots are returned unchanged) so that
+        // every spelling of one directory resolves to exactly one
+        // SspLicensePaths value: the license provider, the DPAPI state store and
+        // the security event sink must never alias the same directory under two
+        // different spellings. Pure string canonicalization - no I/O, and it
+        // only selects which directory is read, never what is authorized.
+        return new SspLicensePaths(Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)));
     }
 }
