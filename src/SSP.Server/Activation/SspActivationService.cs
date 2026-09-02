@@ -34,9 +34,8 @@
 // trust anchor (SspTrustAnchor.Create throws otherwise). There is no
 // unmanaged-permissive mode and no environment/config bypass in this layer.
 
-using System.Threading;
-using System.Threading.PeriodicTimer;
 using System.Text;
+using System.Threading;
 using SSP.Activation;
 using SSP.Core.Activation;
 
@@ -56,8 +55,12 @@ public sealed class SspActivationService : IDisposable
     private readonly ISecurityEventSink _eventSink;
     private readonly ILicenseStateStore _stateStore;
     private readonly ILicenseProvider _licenseProvider;
+    private readonly object _revalidationTimerGate = new();
     private readonly TimeSpan _revalidationInterval = TimeSpan.FromMinutes(30);
     private PeriodicTimer? _revalidationTimer;
+    private CancellationTokenSource? _revalidationCancellation;
+    private Task? _revalidationTask;
+    private bool _disposed;
 
     private SspActivationService(
         SspLicensePaths paths,
@@ -244,49 +247,135 @@ public sealed class SspActivationService : IDisposable
     /// </remarks>
     public void StartRevalidationTimer()
     {
-        // If a timer is already running, do not start another (prevents concurrent loops).
-        if (_revalidationTimer is not null) return;
-
-        _revalidationTimer = new PeriodicTimer(_revalidationInterval);
-        _ = Task.Run(async delegate
+        lock (_revalidationTimerGate)
         {
-            try
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            // Start is idempotent, including when callers race with each other.
+            if (_revalidationTask is not null)
+                return;
+
+            var timer = new PeriodicTimer(_revalidationInterval);
+            var cancellation = new CancellationTokenSource();
+
+            _revalidationTimer = timer;
+            _revalidationCancellation = cancellation;
+            _revalidationTask = Task.Run(
+                () => RunRevalidationLoopAsync(timer, cancellation.Token));
+        }
+    }
+
+    private async Task RunRevalidationLoopAsync(
+        PeriodicTimer timer,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
-                while (_revalidationTimer is not null && await _revalidationTimer.WaitForNextTickAsync())
+                try
                 {
-                    try
-                    {
-                        Manager.Revalidate();
-                    }
-                    catch (Exception ex)
-                    {
-                        // The timer must not produce unobserved background exceptions.
-                        Console.Error.WriteLine($"[activation] Revalidation timer error: {ex.Message}");
-                    }
+                    Revalidate();
+                }
+                catch (Exception ex)
+                {
+                    // A transient provider or validation failure must not fault
+                    // the owned background task or stop later revalidations.
+                    ReportRevalidationTimerError(ex);
                 }
             }
-            catch (OperationCanceledException)
-            {
-                // Expected on shutdown; ignore.
-            }
-        });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Expected when Dispose cancels the pending timer wait.
+        }
+        catch (Exception ex)
+        {
+            // PeriodicTimer itself is not expected to fail, but retaining and
+            // observing the task is not a substitute for diagnosing a failure.
+            ReportRevalidationTimerError(ex);
+        }
+    }
+
+    private static void ReportRevalidationTimerError(Exception ex)
+    {
+        try
+        {
+            Console.Error.WriteLine($"[activation] Revalidation timer error: {ex.Message}");
+        }
+        catch
+        {
+            // Diagnostics must never turn a handled timer failure into a
+            // faulted, unobserved background task.
+        }
     }
 
     /// <summary>Stops the periodic revalidation timer if running.</summary>
     private void StopRevalidationTimer()
     {
-        if (_revalidationTimer is not null)
+        var timer = _revalidationTimer;
+        var cancellation = _revalidationCancellation;
+        var task = _revalidationTask;
+
+        // Clear the owned references before cancellation. Start cannot race
+        // this method because Dispose holds _revalidationTimerGate and has
+        // already marked the service disposed.
+        _revalidationTimer = null;
+        _revalidationCancellation = null;
+        _revalidationTask = null;
+
+        try
         {
-            _revalidationTimer.Dispose();
-            _revalidationTimer = null;
+            cancellation?.Cancel();
         }
+        catch (Exception ex)
+        {
+            ReportRevalidationTimerError(ex);
+        }
+        finally
+        {
+            // Disposing PeriodicTimer makes any pending wait complete; the
+            // cancellation token covers the same shutdown path explicitly.
+            timer?.Dispose();
+        }
+
+        if (task is not null)
+        {
+            try
+            {
+                // Revalidation is synchronous and has no cancellation API, so
+                // wait for an in-flight call before disposing the trust anchor.
+                task.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException) when (cancellation?.IsCancellationRequested == true)
+            {
+                // Defensive: the loop normally handles expected cancellation.
+            }
+            catch (Exception ex)
+            {
+                // Observe every task failure so Dispose cannot leave an
+                // unobserved exception behind.
+                ReportRevalidationTimerError(ex);
+            }
+        }
+
+        cancellation?.Dispose();
     }
 
     /// <inheritdoc />
     public void Dispose()
     {
-        StopRevalidationTimer();
-        _trustAnchor.Dispose();
+        lock (_revalidationTimerGate)
+        {
+            if (_disposed)
+                return;
+
+            _disposed = true;
+            StopRevalidationTimer();
+            _trustAnchor.Dispose();
+        }
+
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>Human-readable, secret-free status report for operators and diagnostics.</summary>
