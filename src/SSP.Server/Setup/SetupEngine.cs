@@ -22,15 +22,52 @@
 
 using System.Reflection;
 using System.Security.Cryptography;
+using SSP.Core.Activation;
 using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
 using SSP.Core.Util;
+using SSP.Server.Activation;
 
 namespace SSP.Server.Setup;
 
 public sealed class SetupEngine
 {
+    /// <summary>
+    /// Provisioning-time licensing gate (EP0a / EP0b), or null when this build
+    /// has no Licensing Authority trust anchor compiled in.
+    ///
+    /// Null is NOT a fail-open path for protected functionality: the RUNTIME
+    /// gates are unconditional and independent of this field - a service cannot
+    /// start (EP1, SspRuntimeLicense.CreateForService), a client cannot enroll
+    /// (EP2, ServerProtocol) and a tunnel cannot be admitted (EP3,
+    /// ServerProtocol) without a valid license. What null means is only that the
+    /// provisioning-time PRE-CHECKS below are unavailable, so an operator in an
+    /// unanchored build can still lay out directories that will never run.
+    /// </summary>
+    private readonly ISspLicenseGate? _license;
+
+    /// <summary>
+    /// Creates the engine without a provisioning-time licensing gate. The
+    /// runtime gates (EP1/EP2/EP3) still apply to anything this engine
+    /// produces; see the remarks on the private <c>_license</c> field.
+    /// </summary>
+    public SetupEngine()
+    {
+    }
+
+    /// <summary>
+    /// Creates the engine with an explicit provisioning-time licensing gate,
+    /// which additionally enforces <c>max_services</c> before a new protected
+    /// service is created (EP0a) and <c>max_clients</c> before an additional
+    /// client is provisioned (EP0b). Production callers obtain the gate from
+    /// <see cref="SspRuntimeLicense.TryCreateForProvisioning"/>.
+    /// </summary>
+    public SetupEngine(ISspLicenseGate? license)
+    {
+        _license = license;
+    }
+
     public SetupResult Result { get; } = new();
 
     /// <summary>
@@ -194,6 +231,16 @@ public sealed class SetupEngine
     {
         ValidateNewApplicationParameters(parameters);
         ValidateNoSiblingPortCollisions(serviceDir, parameters);
+
+        // EP0a - creating a protected service is the primary commercial act, so
+        // it is gated on max_services and on the feature set covering the
+        // protected protocol being created. InvalidOperationException is this
+        // engine's established denial convention: SETUP MODE catches it, prints
+        // "[setup] Failed:" and exits 1 without creating any artifact.
+        //
+        // Usage is measured BEFORE the grant: every complete application
+        // directory that already exists (this one does not exist yet).
+        AuthorizeNewProtectedService(parameters.ApplicationName);
 
         Result.GatewayPort = parameters.GatewayPort;
         Result.ClientTunnelPort = parameters.ClientTunnelPort;
@@ -363,6 +410,15 @@ public sealed class SetupEngine
             }
         }
 
+        // EP0b - provisioning an additional client is where the per-customer
+        // client count is enforced BEFORE a One-Time Token is minted, so a
+        // licensee at max_clients cannot hand out an enrollable credential. The
+        // authoritative runtime enforcement remains EP2 (enrollment), which
+        // counts .index.dat under the enrollment locks; this pre-check gives the
+        // operator the refusal at provisioning time instead of after a client
+        // executable has been built.
+        await AuthorizeAdditionalClientAsync(authPath, ct).ConfigureAwait(false);
+
         // Load existing public key
         var pubPem = await PemStore.LoadPublicKeyAsync(pubPath, ct);
 
@@ -439,6 +495,79 @@ public sealed class SetupEngine
         Result.ClientTunnelPort = existingConfig.ClientTunnelPort;
         Result.Success = true;
         Result.IsAdditionalClient = true;
+    }
+
+    /// <summary>
+    /// EP0a - refuse to create a new protected service unless the license covers
+    /// it. Checks (a) that the protected protocol being created is in the
+    /// licensed feature set and (b) that <c>max_services</c> is not already
+    /// exhausted by the services that exist.
+    ///
+    /// No-op when this build carries no compiled-in trust anchor (see
+    /// <c>_license</c>): the runtime gates remain unconditional, so nothing
+    /// created here can ever become operational without a valid license.
+    /// Denial uses this engine's established <see cref="InvalidOperationException"/>
+    /// convention, which SETUP MODE turns into "[setup] Failed:" + exit 1.
+    /// </summary>
+    private void AuthorizeNewProtectedService(string? applicationName)
+    {
+        if (_license is null)
+            return;
+
+        // The feature identity comes from the single SSP mapping mechanism
+        // (SspLicensing.Features). An application outside SSP's protected
+        // protocol vocabulary carries no feature identity: it is not
+        // feature-gated, but the license-state and limit gates below still
+        // apply, and at runtime EP1/EP3 gate it like any other application.
+        var feature = SspLicensing.Features.ResolveForApplication(applicationName);
+        if (feature is not null)
+        {
+            var featureDecision = _license.CanUseFeature(feature);
+            if (!featureDecision.IsAllowed)
+            {
+                throw new InvalidOperationException(
+                    $"SSP licensing denies creating protected service '{applicationName}': feature " +
+                    $"'{feature}' is not part of the licensed feature set (reason {featureDecision.ReasonCode}).");
+            }
+        }
+
+        // Usage BEFORE the grant: every complete application directory that
+        // already exists. The directory being created does not exist yet, so it
+        // is not counted (and must not be excluded either).
+        var existingServices = SspProtectedServiceInventory.CountProtectedServices();
+        var serviceDecision = _license.CanStartProtectedService(existingServices);
+        if (!serviceDecision.IsAllowed)
+        {
+            throw new InvalidOperationException(
+                $"SSP licensing denies creating another protected service: {existingServices} protected " +
+                $"service instance(s) already exist (reason {serviceDecision.ReasonCode}).");
+        }
+    }
+
+    /// <summary>
+    /// EP0b - refuse to provision an additional client once <c>max_clients</c>
+    /// is reached. The count is the number of clients already authorized for
+    /// this application (<c>.index.dat</c>), measured before the grant.
+    /// </summary>
+    private async Task AuthorizeAdditionalClientAsync(string authPath, CancellationToken ct)
+    {
+        if (_license is null)
+            return;
+
+        long authorisedClients = 0;
+        if (File.Exists(authPath))
+        {
+            var users = await AuthorisedUsersStore.LoadAsync(authPath, ct).ConfigureAwait(false);
+            authorisedClients = users.Users.Count;
+        }
+
+        var decision = _license.CanEnrollClient(authorisedClients);
+        if (!decision.IsAllowed)
+        {
+            throw new InvalidOperationException(
+                $"SSP licensing denies provisioning another client: {authorisedClients} client(s) are " +
+                $"already authorized for this application (reason {decision.ReasonCode}).");
+        }
     }
 
     private static void ValidateNewApplicationParameters(SetupParameters p)

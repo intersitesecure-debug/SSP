@@ -14,6 +14,7 @@ using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
 using SSP.Client.Runtime;
+using SSP.Server.Activation;
 using SSP.Server.Runtime;
 
 namespace SSP.Tests.Helpers;
@@ -25,6 +26,14 @@ public sealed class SspTestHarness : IAsyncDisposable
     public RSA ServerPrivateKey { get; }
     public string ServerPublicKeyPem { get; }
     public ServerGateway Gateway { get; }
+
+    /// <summary>
+    /// The licensing gate the gateway runs under. Tests that are not about
+    /// licensing get the explicit <see cref="UnlicensedTestGate"/> seam; the
+    /// licensing integration tests pass a real <see cref="SspRuntimeLicense"/>
+    /// built by <see cref="LicensedTestEnvironment"/>.
+    /// </summary>
+    public ISspLicenseGate License { get; }
     public TcpListener FakeAppListener { get; }
     public int GatewayPort { get; }
     public int LocalAppPort { get; }
@@ -39,6 +48,7 @@ public sealed class SspTestHarness : IAsyncDisposable
         RSA serverPrivateKey,
         string serverPublicKeyPem,
         ServerGateway gateway,
+        ISspLicenseGate license,
         TcpListener fakeAppListener,
         int gatewayPort,
         int localAppPort,
@@ -50,6 +60,7 @@ public sealed class SspTestHarness : IAsyncDisposable
         ServerPrivateKey = serverPrivateKey;
         ServerPublicKeyPem = serverPublicKeyPem;
         Gateway = gateway;
+        License = license;
         FakeAppListener = fakeAppListener;
         GatewayPort = gatewayPort;
         LocalAppPort = localAppPort;
@@ -60,7 +71,10 @@ public sealed class SspTestHarness : IAsyncDisposable
     // ServiceConfig.ApplicationName is non-nullable, so the app name is too
     // (a null here used to be flagged by the nullable analysis as a possible
     // null reference assignment).
-    public static async Task<SspTestHarness> CreateAsync(string? oneTimeToken = null, string appName = "TEST")
+    public static async Task<SspTestHarness> CreateAsync(
+        string? oneTimeToken = null,
+        string appName = "TEST",
+        ISspLicenseGate? license = null)
     {
         var serviceDir = Path.Combine(System.IO.Path.GetTempPath(), "ssp-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(serviceDir);
@@ -103,10 +117,16 @@ public sealed class SspTestHarness : IAsyncDisposable
         var fakeAppListener = new TcpListener(IPAddress.Loopback, localAppPort);
         fakeAppListener.Start();
 
-        var gateway = new ServerGateway(config, rsa, pubPem, serviceDir);
+        // The gateway's licensing gate is mandatory, so the harness states the
+        // test dependency explicitly instead of leaving it implicit: suites that
+        // are not about licensing run against the allow-all TEST seam (never
+        // reachable from a shipped binary), and the licensing suites pass a real
+        // SspRuntimeLicense.
+        var gate = license ?? UnlicensedTestGate.Instance;
+        var gateway = new ServerGateway(config, rsa, pubPem, serviceDir, gate);
 
         var harness = new SspTestHarness(
-            serviceDir, config, rsa, pubPem, gateway,
+            serviceDir, config, rsa, pubPem, gateway, gate,
             fakeAppListener, gatewayPort, localAppPort, clientTunnelPort,
             ownsServiceDir: true);
 
@@ -120,14 +140,22 @@ public sealed class SspTestHarness : IAsyncDisposable
     /// </summary>
     public string OneTimeToken { get; set; } = string.Empty;
 
-    public static async Task<SspTestHarness> CreateWithExplicitTokenAsync(string oneTimeToken, string appName = "TEST")
+    public static async Task<SspTestHarness> CreateWithExplicitTokenAsync(
+        string oneTimeToken,
+        string appName = "TEST",
+        ISspLicenseGate? license = null)
     {
-        var h = await CreateAsync(oneTimeToken, appName);
+        var h = await CreateAsync(oneTimeToken, appName, license);
         h.OneTimeToken = oneTimeToken;
         return h;
     }
 
-    public static async Task<SspTestHarness> CreateFromExistingConfigAsync(string serviceDir, ServiceConfig config, string privPem, string pubPem)
+    public static async Task<SspTestHarness> CreateFromExistingConfigAsync(
+        string serviceDir,
+        ServiceConfig config,
+        string privPem,
+        string pubPem,
+        ISspLicenseGate? license = null)
     {
         var rsa = RsaCrypto.ImportPrivateKeyPem(privPem);
 
@@ -145,12 +173,14 @@ public sealed class SspTestHarness : IAsyncDisposable
             fakeAppListener.Start();
         }
 
-        var gateway = new ServerGateway(config, rsa, pubPem, serviceDir);
+        // Explicit test seam, exactly as in CreateAsync: the gate is mandatory.
+        var gate = license ?? UnlicensedTestGate.Instance;
+        var gateway = new ServerGateway(config, rsa, pubPem, serviceDir, gate);
         // Caller owns the Application directory. Do not delete it on dispose —
         // additional-client provisioning after enrollment must still see
         // .cache.dat and the existing RSA key pair.
         var harness = new SspTestHarness(
-            serviceDir, config, rsa, pubPem, gateway,
+            serviceDir, config, rsa, pubPem, gateway, gate,
             fakeAppListener, config.GatewayPort, config.LocalApplicationPort, config.ClientTunnelPort,
             ownsServiceDir: false);
 

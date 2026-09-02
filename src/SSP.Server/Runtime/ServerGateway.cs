@@ -3,15 +3,40 @@
 // Gateway runtime used in SERVICE MODE. Listens on 0.0.0.0:GatewayPort,
 // one ServerProtocol per accepted connection, bridges the decrypted
 // tunnel to 127.0.0.1:LocalApplicationPort.
+//
+// LICENSING (P3):
+//   The gate is a MANDATORY, non-nullable constructor dependency. There is no
+//   overload and no default value, so "protected runtime with no enforcement
+//   object" is not representable: the compiler rejects it and the constructor
+//   rejects null. Production obtains the gate from
+//   SspRuntimeLicense.CreateForService (which refuses to return unless the
+//   build has a compiled-in trust anchor AND the license is Valid); tests
+//   supply their own explicit, loudly named gate.
+//
+//   Boundary semantics:
+//     EP1 (service startup, max_services, feature) is enforced ONCE by the
+//         composition root BEFORE this gateway is constructed - a service that
+//         is not licensed never binds its port at all. It is deliberately NOT
+//         re-checked per inbound connection: an accepted TCP connection is not
+//         "starting a protected service", and using CanStartProtectedService
+//         there both mis-states the operation being authorized and mis-counts
+//         the limit (the usage argument is the count BEFORE the grant).
+//     EP1/EP2/EP3 (feature, max_concurrent_tunnels, max_concurrent_sessions)
+//         are enforced per connection by ServerProtocol through
+//         ISspLicenseGate.AdmitTunnel(), after the client has been
+//         cryptographically authenticated and before the tunnel becomes active.
+//         Every one of those decisions is taken live against the LicenseManager,
+//         so a Valid -> LockedDown transition denies the next connection
+//         immediately without a restart. This class caches no licensing state.
 
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
-using SSP.Activation;
 using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
 using SSP.Core.Protocol;
+using SSP.Server.Activation;
 
 namespace SSP.Server.Runtime;
 
@@ -21,7 +46,7 @@ public sealed class ServerGateway : IAsyncDisposable
     private readonly string _serviceDir;
     private readonly RSA _serverPrivateKey;
     private readonly string _serverPublicKeyPem;
-    private readonly ILicenseEnforcement? _enforcement;
+    private readonly ISspLicenseGate _license;
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
 
@@ -45,22 +70,40 @@ public sealed class ServerGateway : IAsyncDisposable
     /// </summary>
     public Task ListenerReady => _listenerReady.Task;
 
-    public ServerGateway(ServiceConfig config, RSA serverPrivateKey, string serverPublicKeyPem, string serviceDir, ILicenseEnforcement? enforcement = null)
+    /// <param name="license">
+    /// The mandatory licensing gate for this service. Never null: a protected
+    /// gateway without one would be a fail-open path.
+    /// </param>
+    public ServerGateway(
+        ServiceConfig config,
+        RSA serverPrivateKey,
+        string serverPublicKeyPem,
+        string serviceDir,
+        ISspLicenseGate license)
     {
-        _config = config;
-        _serverPrivateKey = serverPrivateKey;
-        _serverPublicKeyPem = serverPublicKeyPem;
-        _serviceDir = serviceDir;
-        _enforcement = enforcement;
-        if (enforcement is not null && !enforcement.CanStartProtectedService(0).IsAllowed)
-        {
-            // Enforcement denied even before any client connects — this can happen when
-            // the license state transitions to LockedDown after initial startup but before
-            // the gateway accepts its first connection. Log and remain non-operational
-            // until the license state recoverS (or the process restarts with a valid license).
-            Console.Error.WriteLine($"[gateway] License enforcement denied protected service start: {enforcement.CanStartProtectedService(0).ReasonCode}");
-        }
+        _config = config ?? throw new ArgumentNullException(nameof(config));
+        _serverPrivateKey = serverPrivateKey ?? throw new ArgumentNullException(nameof(serverPrivateKey));
+        _serverPublicKeyPem = serverPublicKeyPem ?? throw new ArgumentNullException(nameof(serverPublicKeyPem));
+        _serviceDir = serviceDir ?? throw new ArgumentNullException(nameof(serviceDir));
+        _license = license ?? throw new ArgumentNullException(
+            nameof(license),
+            "A protected SSP gateway requires a licensing gate. Production callers obtain one from " +
+            "SspRuntimeLicense.CreateForService; tests must pass an explicit gate.");
     }
+
+    /// <summary>
+    /// The licensing gate this gateway runs under. Exposed for diagnostics and
+    /// for tests that assert runtime decisions; it is never used to cache a
+    /// licensing verdict.
+    /// </summary>
+    public ISspLicenseGate License => _license;
+
+    /// <summary>
+    /// Tunnels currently admitted by the license gate and not yet released.
+    /// This is the usage figure <c>max_concurrent_tunnels</c> is enforced
+    /// against; it is owned by the gate, not by this class.
+    /// </summary>
+    public long ActiveTunnels => _license.ActiveTunnels;
 
     /// <summary>
     /// Run the accept loop. Optionally accepts a caller-supplied
@@ -111,21 +154,25 @@ public sealed class ServerGateway : IAsyncDisposable
 
     private async Task HandleClientAsync(TcpClient tcp, CancellationToken ct)
     {
+        // The license slot reserved for this connection. Adopted from the
+        // protocol handler the moment the tunnel is authorized, and released
+        // exactly once in the finally block below - whether the tunnel ran to
+        // completion, the client disconnected, or anything threw in between.
+        SspTunnelAdmission? admission = null;
+
+        // One ServerProtocol per connection, and it is disposable precisely
+        // because it may still be holding the admission if the handshake failed
+        // after the tunnel was authorized (see ServerProtocol.Dispose).
+        var protocol = new ServerProtocol(_config, _serverPrivateKey, _serverPublicKeyPem, _serviceDir, _license);
+
         try
         {
-            // EP0 — License bootstrap / startup gate:
-            // Ensure licensing is initialized before protected functionality becomes available.
-            // Fail closed: if enforcement is configured and the license state does not permit
-            // protected services, deny the connection rather than silently proceeding.
-            if (_enforcement is not null && !_enforcement.CanStartProtectedService(1).IsAllowed)
-            {
-                Console.Error.WriteLine($"[gateway] Protected operation denied (license state not valid); closing connection.");
-                tcp.Close();
-                return;
-            }
-
-            var protocol = new ServerProtocol(_config, _serverPrivateKey, _serverPublicKeyPem, _serviceDir);
             var sessionKey = await protocol.HandleAsync(tcp, ct);
+
+            // Ownership of the reserved slot transfers to this method; the
+            // protocol no longer releases it.
+            admission = protocol.TakeTunnelAdmission();
+
             if (sessionKey is not { Length: > 0 })
                 return;
             using var codec = new TunnelCodec(sessionKey);
@@ -159,6 +206,14 @@ public sealed class ServerGateway : IAsyncDisposable
         }
         finally
         {
+            // Release the licensed slot first: a disconnected client must give
+            // its max_concurrent_tunnels / max_concurrent_sessions reservation
+            // back immediately, or a limit would leak on every dropped call.
+            // Both disposals are idempotent, so the failure path (protocol
+            // still holding the admission) and the success path (this method
+            // holding it) each release it exactly once.
+            admission?.Dispose();
+            protocol.Dispose();
             tcp.Dispose();
         }
     }

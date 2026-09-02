@@ -16,6 +16,10 @@
   <ItemGroup>
     <ProjectReference Include="..\SSP.Core\SSP.Core.csproj" />
     <ProjectReference Include="..\SSP.Server\SSP.Server.csproj" />
+    <!-- Explicit (it is already transitive through SSP.Server): the
+         provisioning-time licensing gate resolved here exposes
+         SSP.Activation types on its public surface. -->
+    <ProjectReference Include="..\SSP.Activation\SSP.Activation.csproj" />
   </ItemGroup>
 
 </Project>

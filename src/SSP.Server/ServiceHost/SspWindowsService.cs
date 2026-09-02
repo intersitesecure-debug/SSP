@@ -55,6 +55,7 @@ using System.ServiceProcess;
 using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
+using SSP.Server.Activation;
 using SSP.Server.Runtime;
 
 namespace SSP.Server.ServiceHost;
@@ -97,6 +98,14 @@ public sealed class SspWindowsService : ServiceBase
     private RSA? _rsa;
     private ServerGateway? _gateway;
     private int _gatewayPort;
+
+    /// <summary>
+    /// The licensing runtime for this service, created inside OnStart once the
+    /// SCM dispatcher is connected. It owns the periodic license refresh and is
+    /// disposed by OnStop; the gateway holds a reference to it for the whole
+    /// connection lifetime, so it must outlive the accept loop.
+    /// </summary>
+    private SspRuntimeLicense? _license;
 
     /// <summary>
     /// Background task that runs the gateway accept loop. Held so OnStop
@@ -281,6 +290,29 @@ public sealed class SspWindowsService : ServiceBase
             var config = LoadConfig();
             _gatewayPort = config.GatewayPort;
 
+            // EP1 - service startup licensing gate, on the SCM path.
+            //
+            // This is inside OnStart, i.e. inside the existing fallible region
+            // whose failure is recorded through ServiceDiagnostics and rethrown
+            // as a DIAGNOSED failed start (ERROR 1064). The ERROR 1053 contract
+            // is untouched: nothing fallible - not this, not the config read,
+            // not the key import - runs before ServiceBase.Run connects the
+            // dispatcher.
+            //
+            // Fail closed: CreateForService throws unless this build carries a
+            // compiled-in Licensing Authority trust anchor AND the license
+            // validates to Valid AND the protected protocol is in the licensed
+            // feature set AND max_services is not exhausted. An unlicensed
+            // service therefore never binds its gateway port, and the operator
+            // gets the license reason code in ssp-service-startup.log and the
+            // Application event log instead of a service that appears to be
+            // running while silently unprotected.
+            //
+            // CreateForService also owns the periodic license refresh: it starts
+            // the timer only after the runtime has been proven licensed, and
+            // OnStop disposes it with the service.
+            _license = SspRuntimeLicense.CreateForService(config, _serviceDir);
+
             var privPath = Path.Combine(_serviceDir, config.ServerPrivateKeyPath);
             var privPem = PemStore.LoadPrivateKeyAsync(privPath).GetAwaiter().GetResult();
             _rsa = RsaCrypto.ImportPrivateKeyPem(privPem);
@@ -288,7 +320,7 @@ public sealed class SspWindowsService : ServiceBase
             var pubPath = Path.Combine(_serviceDir, config.ServerPublicKeyPath);
             var pubPem = PemStore.LoadPublicKeyAsync(pubPath).GetAwaiter().GetResult();
 
-            gateway = new ServerGateway(config, _rsa, pubPem, _serviceDir);
+            gateway = new ServerGateway(config, _rsa, pubPem, _serviceDir, _license);
             _gateway = gateway;
         }
         catch (Exception ex)
@@ -296,6 +328,8 @@ public sealed class SspWindowsService : ServiceBase
             _rsa?.Dispose();
             _rsa = null;
             _gateway = null;
+            _license?.Dispose();
+            _license = null;
 
             // Rethrowing reports a failed start to the SCM (ERROR 1064).
             // Record the real cause first so the 1064 is never opaque.
@@ -439,6 +473,14 @@ public sealed class SspWindowsService : ServiceBase
 
         try { _rsa?.Dispose(); } catch { /* best effort */ }
         _rsa = null;
+
+        // Dispose the licensing runtime only after the accept loop has stopped
+        // and the RSA key is gone: connections still in flight consult the gate,
+        // and the gate owns the periodic license refresh plus the trust anchor.
+        // Disposing it here stops the timer (joining an in-flight refresh) so no
+        // license work continues after the service reports STOPPED.
+        try { _license?.Dispose(); } catch { /* best effort */ }
+        _license = null;
 
         base.OnStop();
     }
