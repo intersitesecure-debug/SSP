@@ -45,7 +45,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client01",
         };
-        var engine1 = new SetupEngine();
+        var engine1 = new SetupEngine(UnlicensedTestGate.Instance);
         await engine1.RunAsync(firstParams);
 
         var privKey1 = await PemStore.LoadPrivateKeyAsync(Path.Combine(baseDir.Path, ".sysdata.bin"));
@@ -60,7 +60,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client02",
         };
-        var engine2 = new SetupEngine();
+        var engine2 = new SetupEngine(UnlicensedTestGate.Instance);
         await engine2.RunAsync(secondParams);
 
         var privKey2 = await PemStore.LoadPrivateKeyAsync(Path.Combine(baseDir.Path, ".sysdata.bin"));
@@ -101,7 +101,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client01",
         };
-        var e1 = new SetupEngine();
+        var e1 = new SetupEngine(UnlicensedTestGate.Instance);
         await e1.RunAsync(p1);
 
         // Simulate enrollment by adding a user to .index.dat
@@ -131,7 +131,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client02",
         };
-        var e2 = new SetupEngine();
+        var e2 = new SetupEngine(UnlicensedTestGate.Instance);
         await e2.RunAsync(p2);
 
         var usersAfter = await AuthorisedUsersStore.LoadAsync(authPath);
@@ -159,7 +159,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client01",
         };
-        var e1 = new SetupEngine();
+        var e1 = new SetupEngine(UnlicensedTestGate.Instance);
         await e1.RunAsync(p1);
 
         var p2 = new SetupParameters
@@ -169,7 +169,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client02",
         };
-        var e2 = new SetupEngine();
+        var e2 = new SetupEngine(UnlicensedTestGate.Instance);
         await e2.RunAsync(p2);
 
         // OTT different
@@ -219,7 +219,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client01",
         };
-        var e1 = new SetupEngine();
+        var e1 = new SetupEngine(UnlicensedTestGate.Instance);
         await e1.RunAsync(p1);
 
         var p2 = new SetupParameters
@@ -229,7 +229,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client02",
         };
-        var e2 = new SetupEngine();
+        var e2 = new SetupEngine(UnlicensedTestGate.Instance);
         await e2.RunAsync(p2);
 
         var p3 = new SetupParameters
@@ -239,7 +239,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client03",
         };
-        var e3 = new SetupEngine();
+        var e3 = new SetupEngine(UnlicensedTestGate.Instance);
         await e3.RunAsync(p3);
 
         var cfgBefore = await ServiceConfigStore.LoadAsync(Path.Combine(baseDir.Path, ".cache.dat"));
@@ -292,7 +292,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client01",
         };
-        var e1 = new SetupEngine();
+        var e1 = new SetupEngine(UnlicensedTestGate.Instance);
         await e1.RunAsync(p1);
 
         await using var harness1 = await CreateHarnessFromServiceDirAsync(baseDir.Path, e1.Result.OneTimeToken);
@@ -312,7 +312,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client02",
         };
-        var e2 = new SetupEngine();
+        var e2 = new SetupEngine(UnlicensedTestGate.Instance);
         await e2.RunAsync(p2);
 
         // Enrollment of Client02 using same service dir (gateway reloads config)
@@ -341,7 +341,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client01",
         };
-        var e1 = new SetupEngine();
+        var e1 = new SetupEngine(UnlicensedTestGate.Instance);
         await e1.RunAsync(p1);
 
         await using var harness = await CreateHarnessFromServiceDirAsync(baseDir.Path, e1.Result.OneTimeToken);
@@ -369,7 +369,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client01",
         };
-        var e1 = new SetupEngine();
+        var e1 = new SetupEngine(UnlicensedTestGate.Instance);
         await e1.RunAsync(p1);
 
         await using var harness = await CreateHarnessFromServiceDirAsync(baseDir.Path, e1.Result.OneTimeToken);
@@ -408,7 +408,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client01",
         };
-        var e1 = new SetupEngine();
+        var e1 = new SetupEngine(UnlicensedTestGate.Instance);
         await e1.RunAsync(p1);
 
         var pDup = new SetupParameters
@@ -418,7 +418,7 @@ public class MultiClientProvisioningTests
             InstallWindowsService = false,
             ClientName = "Client01",
         };
-        var eDup = new SetupEngine();
+        var eDup = new SetupEngine(UnlicensedTestGate.Instance);
         await Assert.ThrowsAnyAsync<Exception>(() => eDup.RunAsync(pDup));
     }
 
@@ -459,7 +459,7 @@ public class MultiClientProvisioningTests
                     ClientName = clientName,
                 };
             }
-            var engine = new SetupEngine();
+            var engine = new SetupEngine(UnlicensedTestGate.Instance);
             await engine.RunAsync(p);
             var cfg = await ServiceConfigStore.LoadAsync(Path.Combine(baseDir.Path, ".cache.dat"));
             // Before enrollment, pending count equals i minus enrolled count

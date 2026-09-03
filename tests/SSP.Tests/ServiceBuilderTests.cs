@@ -7,6 +7,7 @@
 
 using SSP.Core.Models;
 using SSP.Server.Setup;
+using SSP.Tests.Helpers;
 using Xunit;
 
 namespace SSP.Tests;
@@ -36,7 +37,7 @@ public class ServiceBuilderTests
                 InstallWindowsService  = false,
                 ClientName             = "Client01",
             };
-            var engine = new SetupEngine();
+            var engine = new SetupEngine(UnlicensedTestGate.Instance);
             await engine.RunAsync(parameters);
 
             Assert.True(File.Exists(Path.Combine(baseDir, ".sysdata.bin")));
@@ -89,7 +90,7 @@ public class ServiceBuilderTests
                 InstallWindowsService  = false,
                 ClientName             = "Client01",
             };
-            var engine = new SetupEngine();
+            var engine = new SetupEngine(UnlicensedTestGate.Instance);
             await engine.RunAsync(parameters);
 
             Assert.True(File.Exists(engine.Result.ClientExecutablePath));
@@ -120,7 +121,7 @@ public class ServiceBuilderTests
             LocalApplicationPort   = ap,
             ClientTunnelPort       = tp,
         };
-        var engine = new SetupEngine();
+        var engine = new SetupEngine(UnlicensedTestGate.Instance);
         await Assert.ThrowsAsync<ArgumentException>(() => engine.RunAsync(parameters));
     }
 }

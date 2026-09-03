@@ -182,7 +182,23 @@ public sealed class LicensedTestEnvironment : IDisposable
 
         if (!opts.OmitLicenseFile)
         {
-            env.WriteLicense(env.DefaultPayload);
+            // Exercise the artifact failure modes the options describe.  The
+            // production runtime must receive the artifact that the scenario
+            // asks for; silently signing every initial artifact with the trusted
+            // test authority made the tampered/foreign-authority tests exercise
+            // a valid license instead of the fail-closed path.
+            if (opts.SignWithForeignAuthority)
+            {
+                env.WriteLicenseSignedByForeignAuthority(env.DefaultPayload);
+            }
+            else if (opts.CorruptArtifact)
+            {
+                env.WriteCorruptedLicense(env.DefaultPayload);
+            }
+            else
+            {
+                env.WriteLicense(env.DefaultPayload);
+            }
         }
 
         return env;
@@ -216,7 +232,11 @@ public sealed class LicensedTestEnvironment : IDisposable
     /// <summary>Reads and validates the artifact through the wired provider.</summary>
     public LicenseValidationResult Load() => Activation.Load();
 
-    /// <summary>Re-checks the artifact already held in memory against the clock.</summary>
+    /// <summary>
+    /// Revalidates through the wired provider. Provider-backed revalidation
+    /// re-reads the artifact, so installed renewals are observed without a
+    /// process restart.
+    /// </summary>
     public LicenseValidationResult Revalidate() => Activation.Revalidate();
 
     /// <summary>Re-reads the artifact from disk through the production gate.</summary>

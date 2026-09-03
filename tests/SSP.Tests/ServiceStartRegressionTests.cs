@@ -450,7 +450,7 @@ public class ServiceStartRegressionTests
 
         try
         {
-            var engine = new SetupEngine();
+            var engine = new SetupEngine(UnlicensedTestGate.Instance);
             await engine.RunAsync(new SetupParameters
             {
                 ApplicationName        = applicationName,

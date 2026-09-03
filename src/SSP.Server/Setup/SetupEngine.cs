@@ -34,38 +34,24 @@ namespace SSP.Server.Setup;
 public sealed class SetupEngine
 {
     /// <summary>
-    /// Provisioning-time licensing gate (EP0a / EP0b), or null when this build
-    /// has no Licensing Authority trust anchor compiled in.
-    ///
-    /// Null is NOT a fail-open path for protected functionality: the RUNTIME
-    /// gates are unconditional and independent of this field - a service cannot
-    /// start (EP1, SspRuntimeLicense.CreateForService), a client cannot enroll
-    /// (EP2, ServerProtocol) and a tunnel cannot be admitted (EP3,
-    /// ServerProtocol) without a valid license. What null means is only that the
-    /// provisioning-time PRE-CHECKS below are unavailable, so an operator in an
-    /// unanchored build can still lay out directories that will never run.
+    /// The mandatory provisioning-time licensing gate (EP0a / EP0b). Keeping
+    /// this dependency non-nullable makes it impossible to construct a setup
+    /// workflow that silently skips the checks which protect service and client
+    /// provisioning. Production callers obtain it from
+    /// <see cref="SspRuntimeLicense.TryCreateForProvisioning"/>; tests must pass
+    /// an explicit test gate when licensing is outside their scope.
     /// </summary>
-    private readonly ISspLicenseGate? _license;
+    private readonly ISspLicenseGate _license;
 
     /// <summary>
-    /// Creates the engine without a provisioning-time licensing gate. The
-    /// runtime gates (EP1/EP2/EP3) still apply to anything this engine
-    /// produces; see the remarks on the private <c>_license</c> field.
+    /// Creates the engine with the explicit provisioning-time licensing gate.
+    /// The gate enforces <c>max_services</c> before a new protected service is
+    /// created (EP0a) and <c>max_clients</c> before an additional client is
+    /// provisioned (EP0b).
     /// </summary>
-    public SetupEngine()
+    public SetupEngine(ISspLicenseGate license)
     {
-    }
-
-    /// <summary>
-    /// Creates the engine with an explicit provisioning-time licensing gate,
-    /// which additionally enforces <c>max_services</c> before a new protected
-    /// service is created (EP0a) and <c>max_clients</c> before an additional
-    /// client is provisioned (EP0b). Production callers obtain the gate from
-    /// <see cref="SspRuntimeLicense.TryCreateForProvisioning"/>.
-    /// </summary>
-    public SetupEngine(ISspLicenseGate? license)
-    {
-        _license = license;
+        _license = license ?? throw new ArgumentNullException(nameof(license));
     }
 
     public SetupResult Result { get; } = new();
@@ -503,17 +489,11 @@ public sealed class SetupEngine
     /// licensed feature set and (b) that <c>max_services</c> is not already
     /// exhausted by the services that exist.
     ///
-    /// No-op when this build carries no compiled-in trust anchor (see
-    /// <c>_license</c>): the runtime gates remain unconditional, so nothing
-    /// created here can ever become operational without a valid license.
     /// Denial uses this engine's established <see cref="InvalidOperationException"/>
     /// convention, which SETUP MODE turns into "[setup] Failed:" + exit 1.
     /// </summary>
     private void AuthorizeNewProtectedService(string? applicationName)
     {
-        if (_license is null)
-            return;
-
         // The feature identity comes from the single SSP mapping mechanism
         // (SspLicensing.Features). An application outside SSP's protected
         // protocol vocabulary carries no feature identity: it is not
@@ -551,9 +531,6 @@ public sealed class SetupEngine
     /// </summary>
     private async Task AuthorizeAdditionalClientAsync(string authPath, CancellationToken ct)
     {
-        if (_license is null)
-            return;
-
         long authorisedClients = 0;
         if (File.Exists(authPath))
         {

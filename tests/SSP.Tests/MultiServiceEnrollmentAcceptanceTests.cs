@@ -569,7 +569,7 @@ public class MultiServiceEnrollmentAcceptanceTests
 
     private static async Task<SetupResult> SetupAppAsync(string servicesRoot, string appName, string clientName)
     {
-        var engine = new SetupEngine();
+        var engine = new SetupEngine(UnlicensedTestGate.Instance);
         await engine.RunAsync(new SetupParameters
         {
             ApplicationName        = appName,

@@ -22,7 +22,11 @@ public interface ILicenseManager
     /// <summary>Validates an explicitly supplied artifact (e.g. from an online activation response or file import).</summary>
     LicenseValidationResult LoadLicense(string artifactJson);
 
-    /// <summary>Revalidates the currently loaded artifact (e.g. periodically or after time has passed).</summary>
+    /// <summary>
+    /// Revalidates the current artifact. Provider-backed managers re-read the
+    /// provider so installed renewals are observed; managers without a provider
+    /// re-check the artifact supplied through <see cref="LoadLicense"/>.
+    /// </summary>
     LicenseValidationResult Revalidate();
 
     /// <summary>Evaluates a protected operation against the current license state and policy.</summary>

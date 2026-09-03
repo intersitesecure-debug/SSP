@@ -25,10 +25,10 @@
 // anchor above is the only root of trust, and issuance code (LicenseIssuer)
 // is never reachable from any shipped runtime path.
 //
-// Phase 3 scope: composition/bootstrap only. No runtime enforcement gates
-// call into this type yet; nothing in the server runtime references it. The
-// root exists so the later enforcement phase (and operator tooling) has one
-// authoritative way to obtain a fully wired, thread-safe activation runtime.
+// The composition root is also the owner of the runtime enforcement path:
+// SspRuntimeLicense delegates every gate decision back through this service's
+// LicenseManager and its fail-closed policy. There is one authoritative
+// activation runtime rather than separate cached decisions in the server.
 //
 // Fail-closed by construction: the production factory requires a compiled-in
 // trust anchor (SspTrustAnchor.Create throws otherwise). There is no
@@ -248,10 +248,10 @@ public sealed class SspActivationService : IDisposable
             new LicenseEnforcement(manager));
     }
 
-    /// <summary>Loads and validates the license through the wired provider (no-op if already loaded).</summary>
+    /// <summary>Loads and validates the current license through the wired provider.</summary>
     public LicenseValidationResult Load() => Manager.Load();
 
-    /// <summary>Revalidates the currently loaded artifact (periodic/operator refresh).</summary>
+    /// <summary>Revalidates the current provider artifact (periodic/operator refresh).</summary>
     public LicenseValidationResult Revalidate() => Manager.Revalidate();
 
     /// <summary>
@@ -270,11 +270,9 @@ public sealed class SspActivationService : IDisposable
     /// <remarks>
     /// Each tick calls <see cref="RefreshLicense"/>, which re-reads the license
     /// artifact through the wired provider and re-runs the full validation
-    /// pipeline. That is deliberately <c>Load()</c> and not
-    /// <see cref="Revalidate"/>: <c>Revalidate()</c> re-checks only the artifact
-    /// already held in memory, so it can detect expiry but can never notice a
-    /// renewed or superseding license file - and clearing a lockdown requires
-    /// loading a valid artifact (reference ARCHITECTURE §8).
+    /// pipeline. <see cref="LicenseManager.Revalidate"/> owns that refresh
+    /// contract, so expiry and an operator-installed renewal follow the same
+    /// state transition path (reference ARCHITECTURE §8).
     ///
     /// Lifecycle guarantees:
     ///   • exactly one loop - Start is idempotent under <c>_revalidationTimerGate</c>;
@@ -360,22 +358,11 @@ public sealed class SspActivationService : IDisposable
     /// Re-read the license artifact through the wired provider and re-run the
     /// full validation pipeline. Detects expiry, revocation, tampering, a
     /// deleted artifact and a newly installed renewal (which is the only way a
-    /// lockdown is cleared). Falls back to <see cref="Revalidate"/> if the
-    /// manager has no provider, which cannot happen in an SSP composition.
+    /// lockdown is cleared). The manager owns the provider-vs-held-artifact
+    /// decision so the timer and explicit revalidation cannot diverge.
     /// </summary>
     public LicenseValidationResult RefreshLicense()
-    {
-        try
-        {
-            return Manager.Load();
-        }
-        catch (InvalidOperationException)
-        {
-            // No provider configured (never the case for Create/Compose, whose
-            // provider argument is mandatory): re-check the held artifact.
-            return Manager.Revalidate();
-        }
-    }
+        => Manager.Revalidate();
 
     private static void ReportRevalidationTimerError(Exception ex)
     {

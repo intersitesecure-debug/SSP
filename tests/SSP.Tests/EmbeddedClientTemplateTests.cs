@@ -18,6 +18,7 @@ using SSP.Core.IO;
 using SSP.Core.Models;
 using SSP.Core.Util;
 using SSP.Server.Setup;
+using SSP.Tests.Helpers;
 using Xunit;
 
 namespace SSP.Tests;
@@ -272,7 +273,7 @@ public class EmbeddedClientTemplateTests
             ClientName             = "Client01",
         };
 
-        var engine = new SetupEngine();
+        var engine = new SetupEngine(UnlicensedTestGate.Instance);
         await engine.RunAsync(parameters);
 
         Assert.True(File.Exists(Path.Combine(tempDir.Path, ".sysdata.bin")));
@@ -303,7 +304,7 @@ public class EmbeddedClientTemplateTests
             InstallWindowsService  = false,
         };
 
-        var engine = new SetupEngine();
+        var engine = new SetupEngine(UnlicensedTestGate.Instance);
         await engine.RunAsync(parameters);
 
         // The plaintext token is never persisted; the logical config stores
@@ -378,7 +379,7 @@ public class PathResolutionRegressionTests
                 InstallWindowsService  = false,
             };
 
-            var engine = new SetupEngine();
+            var engine = new SetupEngine(UnlicensedTestGate.Instance);
             await engine.RunAsync(parameters);
 
             // The Result.ServiceDirectory must be absolute.

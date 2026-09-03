@@ -346,8 +346,16 @@ public sealed class SspWindowsService : ServiceBase
         catch (Exception ex)
         {
             // Signal the gateway to stop and rethrow so the SCM records the
-            // service as failed instead of "running but broken".
+            // service as failed instead of "running but broken". Cleanup here
+            // is explicit because a failed OnStart is not guaranteed to receive
+            // a later OnStop callback from the SCM.
             _cts.Cancel();
+            try { gateway.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(10)); } catch { }
+            _gateway = null;
+            try { _rsa?.Dispose(); } catch { }
+            _rsa = null;
+            try { _license?.Dispose(); } catch { }
+            _license = null;
             ServiceDiagnostics.WriteStartupFailure(_serviceDir, ex);
             throw;
         }
@@ -470,6 +478,27 @@ public sealed class SspWindowsService : ServiceBase
                 // RunGatewayAsync, so there is nothing to swallow here.
             }
         }
+
+        // RunGatewayAsync owns the accept loop, while ServerGateway owns the
+        // accepted handler tasks and their admission-release finally blocks.
+        // Join both before disposing the license runtime; otherwise a client
+        // that was admitted during STOP could finish after the gate has gone
+        // away and keep its reservation observable until the next process.
+        var gateway = _gateway;
+        if (gateway is not null)
+        {
+            try
+            {
+                gateway.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(10));
+            }
+            catch
+            {
+                // Stopping remains best effort; each handler still has its own
+                // cancellation/finally cleanup and diagnostics are emitted by
+                // the gateway's normal error path.
+            }
+        }
+        _gateway = null;
 
         try { _rsa?.Dispose(); } catch { /* best effort */ }
         _rsa = null;

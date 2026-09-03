@@ -106,10 +106,9 @@ public interface ISspLicenseGate
     AuthorizationDecision CanEnrollClient(long currentAuthorisedClients);
 
     /// <summary>
-    /// EP1: authorize the protected protocol this service forwards. A no-op
-    /// decision (allow) is returned when <see cref="Feature"/> is null, because
-    /// an application outside SSP's protocol vocabulary carries no feature
-    /// identity to check.
+    /// EP1: authorize the protected protocol this service forwards. An
+    /// application outside SSP's protocol vocabulary has no feature identity,
+    /// but its license-state requirement is still enforced by the gate.
     /// </summary>
     AuthorizationDecision CanUseServiceFeature();
 

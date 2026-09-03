@@ -16,4 +16,11 @@ public interface ILicenseEnforcement
     AuthorizationDecision CanUseFeature(string feature);
 
     AuthorizationDecision CheckLimit(string limitName, long currentUsage);
+
+    /// <summary>
+    /// Requires a valid signed license without requiring a particular feature
+    /// or limit. This is used when the host protects an application that has no
+    /// feature identity in its own vocabulary.
+    /// </summary>
+    AuthorizationDecision RequireValidLicense();
 }

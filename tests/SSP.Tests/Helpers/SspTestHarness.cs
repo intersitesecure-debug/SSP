@@ -217,12 +217,16 @@ public sealed class SspTestHarness : IAsyncDisposable
     {
         _cts.Cancel();
         FakeAppListener.Stop();
+        // Join the gateway's accepted handlers so every test observes the same
+        // admission lifecycle as production: cancellation reaches the relay,
+        // then its finally releases the licensed slot before the harness is
+        // torn down.
+        await Gateway.DisposeAsync();
         ServerPrivateKey.Dispose();
         if (_ownsServiceDir)
         {
             try { Directory.Delete(ServiceDir, true); } catch { }
         }
-        await Task.Delay(50);
     }
 
     private static int FreePort()

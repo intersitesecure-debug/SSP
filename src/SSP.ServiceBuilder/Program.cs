@@ -63,13 +63,17 @@ internal static class Program
             };
 
             // EP0a/EP0b: the ServiceBuilder creates protected services through
-            // the same engine as SSP.Server SETUP MODE, so it resolves the same
-            // provisioning-time licensing gate. Null in a build with no
-            // compiled-in trust anchor; the runtime gates (EP1/EP2/EP3) remain
-            // unconditional either way, so nothing created here can ever become
-            // operational without a valid license.
+            // the same engine as SSP.Server SETUP MODE, so provisioning is
+            // mandatory-license gated and cannot be used as a bypass. A missing
+            // trust anchor or invalid artifact is a failed setup, not an
+            // unlicensed artifact-generation mode.
             using var provisioningLicense =
                 SSP.Server.Activation.SspRuntimeLicense.TryCreateForProvisioning(name);
+            if (provisioningLicense is null)
+            {
+                ctx.ExitCode = 1;
+                return;
+            }
             var engine = new SetupEngine(provisioningLicense);
             await engine.RunAsync(parameters);
 

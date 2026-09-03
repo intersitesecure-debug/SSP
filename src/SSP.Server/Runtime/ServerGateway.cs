@@ -29,6 +29,7 @@
 //         so a Valid -> LockedDown transition denies the next connection
 //         immediately without a restart. This class caches no licensing state.
 
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -49,6 +50,10 @@ public sealed class ServerGateway : IAsyncDisposable
     private readonly ISspLicenseGate _license;
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
+    private Task? _acceptLoopTask;
+    private Task? _disposeTask;
+    private readonly object _disposeGate = new();
+    private readonly ConcurrentDictionary<Task, byte> _clientTasks = new();
 
     /// <summary>
     /// Set as soon as the TCP listener has been bound and is accepting
@@ -113,8 +118,12 @@ public sealed class ServerGateway : IAsyncDisposable
     /// </summary>
     public Task RunAsync(CancellationToken externalToken, TaskCompletionSource? readySignal = null)
     {
+        if (_acceptLoopTask is not null)
+            throw new InvalidOperationException("The gateway can only be started once.");
+
         _cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
-        return AcceptLoopAsync(_cts.Token, readySignal ?? _listenerReady);
+        _acceptLoopTask = AcceptLoopAsync(_cts.Token, readySignal ?? _listenerReady);
+        return _acceptLoopTask;
     }
 
     private async Task AcceptLoopAsync(CancellationToken ct, TaskCompletionSource readySignal)
@@ -137,7 +146,23 @@ public sealed class ServerGateway : IAsyncDisposable
                 try { client = await _listener.AcceptTcpClientAsync(ct); }
                 catch (OperationCanceledException) { break; }
 
-                _ = Task.Run(() => HandleClientAsync(client, ct), ct);
+                if (ct.IsCancellationRequested)
+                {
+                    client.Dispose();
+                    break;
+                }
+
+                // Do not pass ct to Task.Run: if shutdown races this point,
+                // Task.Run could return an already-canceled task without ever
+                // invoking HandleClientAsync, leaking the accepted socket and
+                // bypassing its admission-release finally block.
+                var clientTask = Task.Run(() => HandleClientAsync(client, ct));
+                _clientTasks.TryAdd(clientTask, 0);
+                _ = clientTask.ContinueWith(
+                    completed => _clientTasks.TryRemove(completed, out _),
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
             }
         }
         catch (Exception ex)
@@ -191,7 +216,7 @@ public sealed class ServerGateway : IAsyncDisposable
             // and the client's mstsc gets immediate feedback (EOF or
             // IOException) when it finally connects - rather than
             // hanging forever, which was the original bug.
-            var localClient = new TcpClient();
+            using var localClient = new TcpClient();
             await localClient.ConnectAsync(IPAddress.Loopback, _config.LocalApplicationPort, ct);
             await using var localStream = localClient.GetStream();
             var remoteStream = tcp.GetStream();
@@ -218,10 +243,39 @@ public sealed class ServerGateway : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        lock (_disposeGate)
+        {
+            // IAsyncDisposable callers are allowed to dispose concurrently or
+            // more than once. Share one shutdown task so a second caller does
+            // not race a CancellationTokenSource.Dispose call.
+            _disposeTask ??= DisposeCoreAsync();
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
     {
         _cts?.Cancel();
         try { _listener?.Stop(); } catch { /* best effort */ }
-        await Task.CompletedTask;
+
+        // Stop is not enough by itself: accepted handlers own admissions and
+        // release them in their finally blocks. Join the accept loop first so
+        // no new handler can be added, then join every tracked handler before
+        // declaring the gateway disposed.
+        var acceptLoop = _acceptLoopTask;
+        if (acceptLoop is not null)
+        {
+            try { await acceptLoop.ConfigureAwait(false); } catch { /* startup/shutdown is best effort */ }
+        }
+
+        while (!_clientTasks.IsEmpty)
+        {
+            var clients = _clientTasks.Keys.ToArray();
+            try { await Task.WhenAll(clients).ConfigureAwait(false); } catch { /* handlers log and clean up */ }
+        }
+
+        _cts?.Dispose();
     }
 }

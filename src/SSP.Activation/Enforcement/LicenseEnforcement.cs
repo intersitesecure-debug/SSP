@@ -27,4 +27,12 @@ public sealed class LicenseEnforcement : ILicenseEnforcement
 
     public AuthorizationDecision CheckLimit(string limitName, long currentUsage)
         => _manager.Authorize(ProtectedOperation.CheckLimit(limitName, currentUsage));
+
+    /// <summary>
+    /// Requires a valid signed license without adding a feature or limit
+    /// constraint. Hosts use this for protected applications outside their
+    /// known feature vocabulary.
+    /// </summary>
+    public AuthorizationDecision RequireValidLicense()
+        => _manager.Authorize(ProtectedOperation.RequireValidLicense());
 }
