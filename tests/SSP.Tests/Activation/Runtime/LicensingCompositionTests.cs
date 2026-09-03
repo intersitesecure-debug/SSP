@@ -551,7 +551,7 @@ public class LicensingCompositionTests
         {
             if (Environment.TickCount64 > deadline)
             {
-                Assert.True(false, $"Timed out waiting for licensing state {expected}; it is {env.State}.");
+                Assert.Fail($"Timed out waiting for licensing state {expected}; it is {env.State}.");
             }
 
             await Task.Delay(25);

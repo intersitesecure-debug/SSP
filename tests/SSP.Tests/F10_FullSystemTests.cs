@@ -95,7 +95,14 @@ public class F10_FullSystemTests
             using var serverRsa = RsaCrypto.ImportPrivateKeyPem(
                 await PemStore.LoadPrivateKeyAsync(engine.Result.ServerPrivateKeyPath));
             var serverPubPem = await PemStore.LoadPublicKeyAsync(engine.Result.ServerPublicKeyPath);
-            var gateway = new SSP.Server.Runtime.ServerGateway(cfg, serverRsa, serverPubPem, baseDir);
+            // F10 is a pre-existing end-to-end traffic test, not a licensing
+            // test. The gateway now requires an explicit, non-nullable
+            // ISspLicenseGate (production fail-closed invariant), so this legacy
+            // integration declares the test-only allow-all seam explicitly; the
+            // licensing behavior itself is covered by the Activation/Runtime
+            // suites with a real SspRuntimeLicense.
+            var gateway = new SSP.Server.Runtime.ServerGateway(
+                cfg, serverRsa, serverPubPem, baseDir, SSP.Tests.Helpers.UnlicensedTestGate.Instance);
 
             using var cts = new CancellationTokenSource();
             var gatewayTask = Task.Run(() => gateway.RunAsync(cts.Token));

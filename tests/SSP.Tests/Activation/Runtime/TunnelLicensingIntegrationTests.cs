@@ -114,8 +114,7 @@ public class TunnelLicensingIntegrationTests
         {
             if (Environment.TickCount64 > deadline)
             {
-                Assert.True(false,
-                    $"Timed out waiting for ActiveTunnels to reach {expected}; it is {gate.ActiveTunnels}.");
+                Assert.Fail($"Timed out waiting for ActiveTunnels to reach {expected}; it is {gate.ActiveTunnels}.");
             }
 
             await Task.Delay(25);
@@ -570,7 +569,11 @@ public class TunnelLicensingIntegrationTests
             Assert.Equal(LicenseState.Valid, sqlEnv.State);
 
             // Lock the RDP service down by expiring its license.
-            rdp.Env.Clock.Advance(TimeSpan.FromYears(5));
+            // .NET 8 has no TimeSpan.FromYears; the test's default license is
+            // valid for 365 days from the test clock, so advancing by a fixed
+            // 5 * 365 days is deterministically far past expiry and avoids any
+            // leap-year/calendar-boundary dependence.
+            rdp.Env.Clock.Advance(TimeSpan.FromDays(365 * 5));
             Assert.False(rdp.Env.Reload().IsValid);
             Assert.Equal(LicenseState.LockedDown, rdp.Env.State);
             Assert.False(rdp.Gate.AdmitTunnel().IsAdmitted);
