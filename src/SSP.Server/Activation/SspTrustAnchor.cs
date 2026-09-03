@@ -23,9 +23,9 @@ public static class SspTrustAnchor
     ///
     /// TODO (release ceremony): set this to the actual authority public key
     /// before shipping a production-protecting build. A build with no anchor
-    /// compiled in must not enforce (the later composition root enters the
-    /// loud unmanaged-development mode); <see cref="Create"/> fails closed
-    /// rather than falling back to an assumed key.
+    /// compiled in cannot compose either provisioning or runtime authorization;
+    /// <see cref="Create"/> fails closed rather than falling back to an assumed
+    /// key.
     /// </summary>
     public const string AuthorityPublicKeyPem = "";
 
@@ -33,10 +33,9 @@ public static class SspTrustAnchor
     public const int MinimumKeySizeBits = LicenseTrustAnchor.MinimumKeySizeBits;
 
     /// <summary>
-    /// True when this build has an actual trust anchor compiled in. Dev
-    /// builds without one return false so the composition root can run the
-    /// documented unmanaged-dev mode instead of silently enforcing nothing
-    /// while pretending to be licensed.
+    /// True when this build has an actual trust anchor compiled in. Builds
+    /// without one return false and all production composition entry points
+    /// fail closed rather than pretending to be licensed.
     /// </summary>
     public static bool IsCompiledIn => !string.IsNullOrWhiteSpace(AuthorityPublicKeyPem);
 

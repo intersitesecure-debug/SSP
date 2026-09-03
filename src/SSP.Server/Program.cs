@@ -216,10 +216,12 @@ public static class Program
             };
         }
 
-        // EP0a/EP0b: provisioning-time licensing pre-checks. Null in a build with
-        // no compiled-in trust anchor - the runtime gates (EP1/EP2/EP3) remain
-        // unconditional either way.
+        // EP0a/EP0b: provisioning-time licensing is mandatory. A build without
+        // a trust anchor, or an invalid/missing artifact, cannot create a setup
+        // engine and cannot lay out protected-service material.
         using var provisioningLicense = SspRuntimeLicense.TryCreateForProvisioning(p.ApplicationName);
+        if (provisioningLicense is null)
+            return false;
         var engine = new SetupEngine(provisioningLicense);
         try
         {
@@ -240,10 +242,11 @@ public static class Program
         var p = JsonSerializer.Deserialize<SetupParameters>(json, JsonOptions.Default)
                 ?? throw new InvalidDataException($"Failed to deserialize {jsonFile}.");
 
-        // EP0a/EP0b: same provisioning-time licensing pre-checks as the
-        // interactive path, so ServiceBuilder and batch setup cannot be used to
-        // step around them.
+        // EP0a/EP0b: same mandatory provisioning-time checks as the
+        // interactive path, so batch setup cannot step around them.
         using var provisioningLicense = SspRuntimeLicense.TryCreateForProvisioning(p.ApplicationName);
+        if (provisioningLicense is null)
+            return false;
         var engine = new SetupEngine(provisioningLicense);
         await engine.RunAsync(p);
         PrintSetupResult(engine.Result);

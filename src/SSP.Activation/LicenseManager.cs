@@ -189,6 +189,21 @@ public sealed class LicenseManager : ILicenseManager
 
     public LicenseValidationResult Revalidate()
     {
+        // A provider is the authoritative source of the currently installed
+        // artifact. Revalidation must read it again, not only re-check the
+        // string captured by an earlier load: otherwise expiry is detected but
+        // an operator-installed renewal can never clear a lockdown until the
+        // process is restarted or some separate caller happens to invoke Load.
+        //
+        // The provider fetch is still transport-only; Load performs the full
+        // validation pipeline and Apply performs the state transition under the
+        // manager lock. A provider-less manager is supported for explicit
+        // LoadLicense users and retains the original held-artifact behavior.
+        if (_provider is not null)
+        {
+            return Load();
+        }
+
         string? artifact;
         lock (_gate)
         {
@@ -279,12 +294,15 @@ public sealed class LicenseManager : ILicenseManager
                 {
                     stored = _stateStore.Load();
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // A state-store read failure during Apply is treated the same way as
-                    // PersistAcceptedSequence does: the signature is the root of trust, so a
-                    // transient store failure never blocks an already-validated license.
-                    stored = null;
+                    // The validator reads the store once, but Apply reads it again while
+                    // holding the manager lock to close the concurrent-validation race.
+                    // A failure on this second read cannot be treated as an empty floor:
+                    // doing so would authorize a license without knowing the anti-rollback
+                    // state. Keep the installation denied and surface the infrastructure
+                    // failure as a normal validation result.
+                    return ApplyStateStoreFailure(result, artifactJson, ex);
                 }
 
                 if (stored is not null && payload.SequenceNumber < stored.HighestAcceptedSequenceNumber)
@@ -324,6 +342,7 @@ public sealed class LicenseManager : ILicenseManager
                 _currentLicense = result.License;
                 PublishSnapshot();
                 PersistAcceptedSequence(payload);
+
                 if (wasLockedDown)
                 {
                     _eventSink.Report(MakeEvent(LicenseSecurityEventType.LicenseLockdownCleared, result));
@@ -378,9 +397,46 @@ public sealed class LicenseManager : ILicenseManager
         }
         catch
         {
-            // State store failures must never prevent an already-validated license from
-            // being honored; the signature is the root of trust, the store only restricts.
+            // State store writes remain best effort by contract: the signed
+            // artifact is the root of trust, while the persisted floor only
+            // restricts future authorization.
         }
+    }
+
+    /// <summary>Converts a state-store failure encountered after artifact validation into a denied result.</summary>
+    private LicenseValidationResult ApplyStateStoreFailure(
+        LicenseValidationResult validatedResult,
+        string? artifactJson,
+        Exception error)
+    {
+        var failureState = _state is LicenseState.Valid or LicenseState.LockedDown
+            ? LicenseState.LockedDown
+            : LicenseState.Unknown;
+        var failure = LicenseValidationResult.Fail(
+            failureState,
+            LicenseReasons.StateStoreUnavailable,
+            $"License state store is unavailable: {error.GetType().Name}",
+            validatedResult.License);
+        var validationEvent = MakeEvent(LicenseSecurityEventType.LicenseValidationFailed, failure);
+        failure = failure with { SecurityEvent = validationEvent };
+
+        _lastResult = failure;
+        if (artifactJson is not null)
+        {
+            _lastArtifact = artifactJson;
+        }
+
+        var wasLockedDown = _state == LicenseState.LockedDown;
+        _state = failureState;
+        _currentLicense = null;
+        PublishSnapshot();
+        _eventSink.Report(validationEvent);
+        if (_state == LicenseState.LockedDown && !wasLockedDown)
+        {
+            _eventSink.Report(MakeEvent(LicenseSecurityEventType.LicenseLockdownActivated, failure));
+        }
+
+        return failure;
     }
 
     private LicenseSecurityEvent MakeEvent(LicenseSecurityEventType eventType, LicenseValidationResult result)

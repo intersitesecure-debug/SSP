@@ -292,7 +292,7 @@ public class OneClientMultiServiceTests
         Directory.CreateDirectory(baseDir);
         try
         {
-            var engine = new SetupEngine();
+            var engine = new SetupEngine(UnlicensedTestGate.Instance);
             await engine.RunAsync(new SetupParameters
             {
                 ApplicationName = "RDP",
@@ -376,7 +376,7 @@ public class OneClientMultiServiceTests
         try
         {
             var client01 = await SetupAppAsync(servicesRoot, "RDP", "Client01");
-            var client02Engine = new SetupEngine();
+            var client02Engine = new SetupEngine(UnlicensedTestGate.Instance);
             await client02Engine.RunAsync(new SetupParameters
             {
                 ApplicationName = "RDP",
@@ -579,7 +579,7 @@ public class OneClientMultiServiceTests
 
     private static async Task<SetupResult> SetupAppAsync(string parentDir, string appName, string clientName)
     {
-        var engine = new SetupEngine();
+        var engine = new SetupEngine(UnlicensedTestGate.Instance);
         await engine.RunAsync(new SetupParameters
         {
             ApplicationName = appName,

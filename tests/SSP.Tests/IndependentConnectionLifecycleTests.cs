@@ -739,7 +739,7 @@ public class IndependentConnectionLifecycleTests
         string servicesRoot, string appName, string clientName,
         int? gatewayPort = null, int? clientTunnelPort = null)
     {
-        var engine = new SetupEngine();
+        var engine = new SetupEngine(UnlicensedTestGate.Instance);
         await engine.RunAsync(new SetupParameters
         {
             ApplicationName = appName,

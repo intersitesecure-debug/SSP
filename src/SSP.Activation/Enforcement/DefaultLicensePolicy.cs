@@ -27,6 +27,11 @@ public sealed class DefaultLicensePolicy : ILicensePolicy
 
         switch (context.Operation.Kind)
         {
+            case ProtectedOperation.RequireValidLicenseKind:
+                // The common state/license guard above has already run. This
+                // operation intentionally adds no feature or limit constraint.
+                return AuthorizationDecision.Allow();
+
             case ProtectedOperation.UseFeatureKind:
             {
                 var feature = context.Operation.Feature;

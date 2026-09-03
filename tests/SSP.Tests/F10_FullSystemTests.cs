@@ -57,7 +57,7 @@ public class F10_FullSystemTests
                 InstallWindowsService  = false,
             };
 
-            var engine = new SetupEngine();
+            var engine = new SetupEngine(UnlicensedTestGate.Instance);
             await engine.RunAsync(parameters);
             var ott = engine.Result.OneTimeToken;
 
@@ -192,7 +192,7 @@ public class F10_FullSystemTests
                 InstallWindowsService  = false,
             };
 
-            var engine = new SetupEngine();
+            var engine = new SetupEngine(UnlicensedTestGate.Instance);
             await engine.RunAsync(parameters);
 
             var clientPath = engine.Result.ClientExecutablePath;

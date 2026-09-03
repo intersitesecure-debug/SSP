@@ -59,19 +59,32 @@ public sealed class ClientProtocol
             throw;
         }
 
-        var stream = tcp.GetStream();
-
-        byte[] sessionKey;
-        if (_runtime.IsEnrolled)
+        try
         {
-            sessionKey = await RunFutureAuthorizationAsync(stream, ct);
-        }
-        else
-        {
-            sessionKey = await RunEnrollmentAsync(stream, ct, establishSessionKey: true);
-        }
+            var stream = tcp.GetStream();
 
-        return (tcp, sessionKey);
+            byte[] sessionKey;
+            if (_runtime.IsEnrolled)
+            {
+                sessionKey = await RunFutureAuthorizationAsync(stream, ct);
+            }
+            else
+            {
+                sessionKey = await RunEnrollmentAsync(stream, ct, establishSessionKey: true);
+            }
+
+            return (tcp, sessionKey);
+        }
+        catch
+        {
+            // Once the TCP connection has been established, authentication
+            // failures must close the client side as well as relying on the
+            // server to tear its handler down. Otherwise a failed enrollment or
+            // authorization leaves a live client socket behind and obscures the
+            // real admission lifecycle during retries and shutdown.
+            tcp.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

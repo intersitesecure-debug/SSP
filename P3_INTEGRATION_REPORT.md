@@ -230,9 +230,9 @@ Test: `EnrollmentSocket_CannotOpenADataPlane_WhenTheFeatureIsNotLicensed`.
   next tick — no overlap. The body catches everything, so a transient provider/I-O failure
   neither faults the owned task nor stops later refreshes (test:
   `RevalidationTimer_SurvivesAProviderFailure_WithoutFailingOpen`).
-* Each tick calls `Load()` **not** `Revalidate()`: `Revalidate()` re-checks only the
-  artifact held in memory, so it can detect expiry but can never notice a renewal — and
-  clearing a lockdown requires *loading* a valid artifact.
+* Each tick calls `RefreshLicense()` → provider-backed `Revalidate()`, which re-reads the
+  artifact and runs the full validation pipeline. This detects expiry and an installed
+  renewal, while clearing a lockdown only through a newly validated artifact.
 * `Dispose()` clears the owned references under the gate, cancels, disposes the
   `PeriodicTimer`, **joins the loop outside the gate** (so an in-flight RSA/file refresh is
   never serialized against unrelated `IsRevalidationTimerRunning` readers), observes every
@@ -551,8 +551,8 @@ COMPOSITION ROOTS (one gate per protected service process)
 PROVISIONING (short-lived; no timer)
   SSP.Server.Program.RunInteractiveSetupAsync / RunBatchSetupAsync
   SSP.ServiceBuilder.Program
-        └─► SspRuntimeLicense.TryCreateForProvisioning(appName)   → null when no anchor
-              └─► SetupEngine(ISspLicenseGate?)
+        └─► SspRuntimeLicense.TryCreateForProvisioning(appName)   → null when no anchor/valid license
+              └─► SetupEngine(ISspLicenseGate)
                     ├─ AuthorizeNewProtectedService(appName)      EP0a (feature + max_services)
                     └─ AuthorizeAdditionalClientAsync(authPath)   EP0b (max_clients, pre-OTT)
 
@@ -652,7 +652,7 @@ src/SSP.Server/Runtime/ServerProtocol.cs           + EP2 enrollment gate, EP3 fu
                                                      TakeTunnelAdmission/Dispose
 src/SSP.Server/ServiceHost/SspWindowsService.cs    + CreateForService in OnStart, _license field,
                                                      disposal after the gateway in OnStop
-src/SSP.Server/Setup/SetupEngine.cs                + optional ISspLicenseGate?, EP0a, EP0b
+src/SSP.Server/Setup/SetupEngine.cs                + mandatory ISspLicenseGate, EP0a, EP0b
 src/SSP.ServiceBuilder/Program.cs                  + TryCreateForProvisioning
 src/SSP.ServiceBuilder/SSP.ServiceBuilder.csproj   + SSP.Activation ProjectReference
 ```

@@ -10,6 +10,7 @@ using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
 using SSP.Server.Setup;
+using SSP.Tests.Helpers;
 using Xunit;
 
 namespace SSP.Tests;
@@ -55,7 +56,7 @@ public class F8_MultiServiceTests
                     ServiceDirectory       = Path.Combine(baseDir, s.Name),
                     InstallWindowsService  = false,
                 };
-                var engine = new SetupEngine();
+                var engine = new SetupEngine(UnlicensedTestGate.Instance);
                 await engine.RunAsync(parameters);
                 engines.Add(engine.Result);
             }
@@ -130,7 +131,7 @@ public class F8_MultiServiceTests
                 InstallWindowsService  = false,
             };
 
-            var engine = new SetupEngine();
+            var engine = new SetupEngine(UnlicensedTestGate.Instance);
             await engine.RunAsync(parameters);
 
             var cfg = await ServiceConfigStore.LoadAsync(engine.Result.ServerConfigPath);

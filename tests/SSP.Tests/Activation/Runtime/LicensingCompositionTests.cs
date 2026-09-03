@@ -170,9 +170,9 @@ public class LicensingCompositionTests
     }
 
     /// <summary>
-    /// Provisioning is allowed to run without licensing knowledge - it creates
-    /// directories and keys, not tunnels - but it must say so loudly and must
-    /// return null rather than a gate that appears to authorize.
+    /// Provisioning cannot run without licensing knowledge. The production
+    /// helper must say so loudly and return null rather than a gate that appears
+    /// to authorize; SetupEngine consequently requires an explicit gate.
     /// </summary>
     [Fact]
     public void ProvisioningWithoutATrustAnchor_ReturnsNull_Loudly_AndNeverAGate()
@@ -338,7 +338,7 @@ public class LicensingCompositionTests
         try
         {
             // The operator installs a renewed artifact. The loop must notice it
-            // by re-reading the provider (Load, not Revalidate) - a lockdown is
+            // by re-reading the provider through Revalidate - a lockdown is
             // only ever cleared by loading a valid artifact.
             env.WriteLicense(LicensedTestEnvironment.BuildPayload(new LicensedTestOptions
             {

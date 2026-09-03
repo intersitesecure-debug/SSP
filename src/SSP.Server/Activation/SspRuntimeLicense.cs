@@ -179,11 +179,10 @@ public sealed class SspRuntimeLicense : ISspLicenseGate, IDisposable
     /// Compose the production licensing runtime for a provisioning (SETUP MODE)
     /// run. Provisioning is short-lived, so no revalidation timer is started.
     /// Returns null - with one loud diagnostic - when this build has no compiled
-    /// trust anchor: in that case the machine has no licensing authority at all,
-    /// and the provisioning-time limit pre-checks are simply unavailable. The
-    /// RUNTIME gates (EP1 service start, EP2 enrollment, EP3 tunnel admission)
-    /// remain unconditional, so no protected operation can ever become available
-    /// without a valid license.
+    /// trust anchor or the license is not valid. Callers must treat null as a
+    /// failed setup and must not construct <see cref="SSP.Server.Setup.SetupEngine"/>
+    /// without the returned gate. The runtime gates (EP1 service start, EP2 enrollment, EP3
+    /// tunnel admission) remain fail-closed as well.
     /// </summary>
     public static SspRuntimeLicense? TryCreateForProvisioning(
         string? applicationName = null,
@@ -388,10 +387,12 @@ public sealed class SspRuntimeLicense : ISspLicenseGate, IDisposable
     /// <inheritdoc />
     public AuthorizationDecision CanUseServiceFeature()
     {
-        // No feature identity -> no feature to check. The Valid-state and limit
-        // gates are unaffected and are applied by every other decision here.
+        // No feature identity -> there is no feature-membership check, but
+        // this is still a protected operation and must require a valid signed
+        // license. Do not turn an unknown application name into an allow-all
+        // decision by returning AuthorizationDecision.Allow() here.
         return Feature is null
-            ? AuthorizationDecision.Allow()
+            ? _activation.Enforcement.RequireValidLicense()
             : _activation.Enforcement.CanUseFeature(Feature);
     }
 
@@ -400,11 +401,11 @@ public sealed class SspRuntimeLicense : ISspLicenseGate, IDisposable
         => _activation.Enforcement.CanUseFeature(feature);
 
     /// <summary>
-    /// Re-read and re-validate the license artifact from disk. Used by the
-    /// periodic timer and by enrollment: unlike <c>Revalidate()</c>, which
-    /// re-checks the artifact already held in memory, this picks up a newly
-    /// installed (renewed or superseding) license file, which is the only way a
-    /// lockdown can be cleared.
+    /// Re-read and re-validate the license artifact from disk. This is the
+    /// explicit reload operation used by operator/test callers; the periodic
+    /// path uses <c>Revalidate()</c>, whose provider-backed implementation has
+    /// the same behavior. A newly installed (renewed or superseding) license is
+    /// therefore able to clear a lockdown without restarting the process.
     /// </summary>
     public LicenseValidationResult Reload() => _activation.Load();
 

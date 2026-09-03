@@ -9,6 +9,7 @@ public sealed record ProtectedOperation
 {
     internal const string UseFeatureKind = "use_feature";
     internal const string LimitCheckKind = "limit_check";
+    internal const string RequireValidLicenseKind = "require_valid_license";
 
     private ProtectedOperation(string kind, string? feature, string? limitName, long currentUsage)
     {
@@ -18,7 +19,7 @@ public sealed record ProtectedOperation
         CurrentUsage = currentUsage;
     }
 
-    /// <summary>Operation kind discriminator ("use_feature" or "limit_check").</summary>
+    /// <summary>Operation kind discriminator ("use_feature", "limit_check" or "require_valid_license").</summary>
     public string Kind { get; }
 
     /// <summary>Requested feature for use_feature operations.</summary>
@@ -49,4 +50,12 @@ public sealed record ProtectedOperation
     /// <summary>Generic limit check against a host-defined limit name.</summary>
     public static ProtectedOperation CheckLimit(string limitName, long currentUsage)
         => new(LimitCheckKind, null, limitName, currentUsage);
+
+    /// <summary>
+    /// Authorization for a protected operation whose application has no SSP
+    /// feature identity. It still requires a currently valid signed license;
+    /// it simply does not impose a feature-membership check.
+    /// </summary>
+    public static ProtectedOperation RequireValidLicense()
+        => new(RequireValidLicenseKind, null, null, 0);
 }

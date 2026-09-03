@@ -493,7 +493,7 @@ public class MultiServerMultiServiceTests
 
     private static async Task<SetupResult> SetupAsync(string servicesRoot, string app, string clientName)
     {
-        var engine = new SetupEngine();
+        var engine = new SetupEngine(UnlicensedTestGate.Instance);
         await engine.RunAsync(new SetupParameters
         {
             ApplicationName        = app,
@@ -511,7 +511,7 @@ public class MultiServerMultiServiceTests
 
     private static async Task<string> ProvisionAdditionalClientAsync(SetupResult existing, string clientName)
     {
-        var engine = new SetupEngine();
+        var engine = new SetupEngine(UnlicensedTestGate.Instance);
         await engine.RunAsync(new SetupParameters
         {
             ApplicationName       = Path.GetFileName(existing.ServiceDirectory),
