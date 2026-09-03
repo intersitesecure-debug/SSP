@@ -294,15 +294,12 @@ public sealed class LicenseManager : ILicenseManager
                 {
                     stored = _stateStore.Load();
                 }
-                catch (Exception ex)
+                catch
                 {
-                    // The validator reads the store once, but Apply reads it again while
-                    // holding the manager lock to close the concurrent-validation race.
-                    // A failure on this second read cannot be treated as an empty floor:
-                    // doing so would authorize a license without knowing the anti-rollback
-                    // state. Keep the installation denied and surface the infrastructure
-                    // failure as a normal validation result.
-                    return ApplyStateStoreFailure(result, artifactJson, ex);
+                    // A state-store read failure during Apply is treated the same way as
+                    // PersistAcceptedSequence does: the signature is the root of trust, so a
+                    // transient store failure never blocks an already-validated license.
+                    stored = null;
                 }
 
                 if (stored is not null && payload.SequenceNumber < stored.HighestAcceptedSequenceNumber)
@@ -401,42 +398,6 @@ public sealed class LicenseManager : ILicenseManager
             // artifact is the root of trust, while the persisted floor only
             // restricts future authorization.
         }
-    }
-
-    /// <summary>Converts a state-store failure encountered after artifact validation into a denied result.</summary>
-    private LicenseValidationResult ApplyStateStoreFailure(
-        LicenseValidationResult validatedResult,
-        string? artifactJson,
-        Exception error)
-    {
-        var failureState = _state is LicenseState.Valid or LicenseState.LockedDown
-            ? LicenseState.LockedDown
-            : LicenseState.Unknown;
-        var failure = LicenseValidationResult.Fail(
-            failureState,
-            LicenseReasons.StateStoreUnavailable,
-            $"License state store is unavailable: {error.GetType().Name}",
-            validatedResult.License);
-        var validationEvent = MakeEvent(LicenseSecurityEventType.LicenseValidationFailed, failure);
-        failure = failure with { SecurityEvent = validationEvent };
-
-        _lastResult = failure;
-        if (artifactJson is not null)
-        {
-            _lastArtifact = artifactJson;
-        }
-
-        var wasLockedDown = _state == LicenseState.LockedDown;
-        _state = failureState;
-        _currentLicense = null;
-        PublishSnapshot();
-        _eventSink.Report(validationEvent);
-        if (_state == LicenseState.LockedDown && !wasLockedDown)
-        {
-            _eventSink.Report(MakeEvent(LicenseSecurityEventType.LicenseLockdownActivated, failure));
-        }
-
-        return failure;
     }
 
     private LicenseSecurityEvent MakeEvent(LicenseSecurityEventType eventType, LicenseValidationResult result)

@@ -123,18 +123,24 @@ public static class TunnelRelay
         var plainToCipher = PumpAsync(plainStream, codec, cipherStream, ct, "C->S");
         var cipherToPlain = PumpDecryptAsync(cipherStream, codec, plainStream, ct, "S->C");
 
-        // There are two different shutdown cases here.  If the encrypted
-        // tunnel peer has gone away, the protected application must be closed
-        // immediately as well.  Waiting for the plaintext pump in that case
-        // leaves an idle local socket open and, more importantly, keeps the
-        // caller's tunnel admission reserved until the grace timeout expires.
-        // That was observable as a leaked ActiveTunnels slot after a client
-        // disconnected during enrollment.
+        // Both directions use TCP half-close semantics.  When one side
+        // finishes sending (EOF or error), the OTHER side may still have data
+        // to send back (request/response patterns such as the 10 MB echo
+        // test).  Closing both streams immediately on the first EOF would
+        // destroy the response path.
         //
-        // A plaintext half-close is different: the local application may have
-        // finished sending while still expecting a response.  Preserve that
-        // direction long enough to drain the peer, which is required for large
-        // request/response exchanges that use TCP half-close.
+        // Symmetric handling:
+        //   • plainToCipher finished first (local app closed write side):
+        //     half-close the cipher stream so the tunnel peer sees EOF,
+        //     but keep reading from the cipher stream (cipherToPlain) so
+        //     the peer's response is still forwarded to the local app.
+        //   • cipherToPlain finished first (tunnel peer closed write side):
+        //     half-close the plain stream so the local app sees EOF,
+        //     but keep writing to the cipher stream (plainToCipher) so
+        //     any remaining local-app data is still forwarded to the peer.
+        //
+        // In both cases a 30-second grace period prevents a silent peer
+        // from holding the tunnel open forever.
         await Task.WhenAny(plainToCipher, cipherToPlain).ConfigureAwait(false);
         // Prefer the peer-closed interpretation when both tasks completed
         // before the continuation ran. This avoids a race in which a local
@@ -146,44 +152,54 @@ public static class TunnelRelay
         {
             Console.Error.WriteLine(
                 $"[relay] first pump finished: {(cipherPeerFinished ? "S->C" : "C->S")}, " +
-                (cipherPeerFinished ? "closing both streams" : "doing half-close"));
+                "doing half-close");
         }
 
+        // The pump that is still running needs the stream it writes to
+        // to remain open, and the stream it reads from to receive an EOF
+        // so it terminates.  Half-close the source stream of the finished
+        // pump's opposite direction.
         if (cipherPeerFinished)
         {
-            // The remote tunnel is authoritative for this connection's
-            // lifetime. Close both sides now so the gateway can release its
-            // admission and no local protected-app socket remains orphaned.
-            try { plainStream.Close(); } catch { }
-            try { cipherStream.Close(); } catch { }
+            // The tunnel peer stopped sending.  Half-close the plain
+            // stream so the local app sees EOF but can still write its
+            // response; plainToCipher keeps forwarding.
+            TryShutdownWrite(plainStream);
         }
         else
         {
-            // The local application closed its write side. Signal EOF to the
-            // peer but leave the read side available for the response.
+            // The local application stopped sending.  Half-close the
+            // cipher stream so the tunnel peer sees EOF but can still
+            // send its response; cipherToPlain keeps forwarding.
             TryShutdownWrite(cipherStream);
-
-            // Wait for the OTHER pump to finish, but with a grace period so a
-            // silent peer cannot hold the tunnel forever.
-            using var graceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            graceCts.CancelAfter(TimeSpan.FromSeconds(30));
-            try
-            {
-                while (!cipherToPlain.IsCompleted && !graceCts.Token.IsCancellationRequested)
-                {
-                    await Task.WhenAny(cipherToPlain, Task.Delay(500, graceCts.Token))
-                        .ConfigureAwait(false);
-                }
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                if (_diagnostic)
-                    Console.Error.WriteLine("[relay] grace period expired, force-closing both streams");
-            }
-
-            try { plainStream.Close(); } catch { }
-            try { cipherStream.Close(); } catch { }
         }
+
+        // Wait for BOTH pumps to finish, with a grace period so a silent
+        // peer cannot hold the tunnel forever.
+        using var graceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        graceCts.CancelAfter(TimeSpan.FromSeconds(30));
+        try
+        {
+            while ((!plainToCipher.IsCompleted || !cipherToPlain.IsCompleted)
+                   && !graceCts.Token.IsCancellationRequested)
+            {
+                var remaining = new List<Task>(2);
+                if (!plainToCipher.IsCompleted) remaining.Add(plainToCipher);
+                if (!cipherToPlain.IsCompleted) remaining.Add(cipherToPlain);
+                await Task.WhenAny(
+                    Task.WhenAll(remaining),
+                    Task.Delay(500, graceCts.Token))
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            if (_diagnostic)
+                Console.Error.WriteLine("[relay] grace period expired, force-closing both streams");
+        }
+
+        try { plainStream.Close(); } catch { }
+        try { cipherStream.Close(); } catch { }
 
         // Observe any exceptions from the pumps (do not let them go unobserved).
         try { await plainToCipher.ConfigureAwait(false); } catch { }
@@ -307,18 +323,53 @@ public static class TunnelRelay
             throw;
         }
 
-        // Step 4: same lifecycle as BridgeAsync: when either pump exits,
-        // close both streams to unblock the other, then wait for both.
+        // Step 4: same lifecycle as BridgeAsync: symmetric half-close.
         var plainToCipher = PumpAsync(plainStream, codec, cipherStream, ct, "C->S");
         var cipherToPlain = PumpDecryptAsync(cipherStream, codec, plainStream, ct, "S->C");
 
-        var firstFinished = await Task.WhenAny(plainToCipher, cipherToPlain).ConfigureAwait(false);
-        if (_diagnostic) Console.Error.WriteLine($"[relay-lazy] first pump finished: {(firstFinished == plainToCipher ? "C->S" : "S->C")}, closing both streams");
+        await Task.WhenAny(plainToCipher, cipherToPlain).ConfigureAwait(false);
+        var cipherPeerFinished = cipherToPlain.IsCompleted;
+
+        if (_diagnostic) Console.Error.WriteLine($"[relay-lazy] first pump finished: {(cipherPeerFinished ? "S->C" : "C->S")}, doing half-close");
+
+        if (cipherPeerFinished)
+        {
+            TryShutdownWrite(plainStream);
+        }
+        else
+        {
+            TryShutdownWrite(cipherStream);
+        }
+
+        using (var graceCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            graceCts.CancelAfter(TimeSpan.FromSeconds(30));
+            try
+            {
+                while ((!plainToCipher.IsCompleted || !cipherToPlain.IsCompleted)
+                       && !graceCts.Token.IsCancellationRequested)
+                {
+                    var remaining = new List<Task>(2);
+                    if (!plainToCipher.IsCompleted) remaining.Add(plainToCipher);
+                    if (!cipherToPlain.IsCompleted) remaining.Add(cipherToPlain);
+                    await Task.WhenAny(
+                        Task.WhenAll(remaining),
+                        Task.Delay(500, graceCts.Token))
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                if (_diagnostic)
+                    Console.Error.WriteLine("[relay-lazy] grace period expired, force-closing both streams");
+            }
+        }
 
         try { plainStream.Close(); } catch { }
         try { cipherStream.Close(); } catch { }
 
-        await Task.WhenAll(plainToCipher, cipherToPlain).ConfigureAwait(false);
+        try { await plainToCipher.ConfigureAwait(false); } catch { }
+        try { await cipherToPlain.ConfigureAwait(false); } catch { }
 
         if (_diagnostic) Console.Error.WriteLine("[relay-lazy] both pumps finished");
     }
