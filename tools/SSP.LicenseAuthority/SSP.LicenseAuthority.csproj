@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    SSP Licensing Authority tooling. This project is INTERNAL-ONLY:
+
+      * it is not referenced by SSP.Server, SSP.ServiceHost, SSP.Client,
+        SSP.ServiceBuilder or SSP.Core
+      * it is not added to any publish target or customer package
+      * it ships no key material (no embedded resources, no compiled-in keys)
+      * the authority PRIVATE key is supplied by the operator on every
+        invocation as a file that lives OUTSIDE the SSP repository
+
+    Dependencies: SSP.Activation only (BCL). No System.CommandLine, no
+    SSP.Core — so the tool cannot accidentally pull DPAPI, the client
+    template, or any shipped runtime into the authority process.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>SSP.LicenseAuthority</AssemblyName>
+    <RootNamespace>SSP.LicenseAuthority</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <DebugType>embedded</DebugType>
+    <NuGetAudit>false</NuGetAudit>
+    <Description>Offline SSP Licensing Authority tooling. Never shipped with customer SSP binaries. Holds no key material of its own.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SSP.Activation\SSP.Activation.csproj" />
+  </ItemGroup>
+
+</Project>

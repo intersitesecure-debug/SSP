@@ -10,8 +10,9 @@ by the ceremony below.
 
 The authority **private key never enters this repository, this build, or any
 shipped artifact** — not as a file, not as a secret variable, not as a signing
-step in CI. It is used only by the (future, P4) authority tooling on the offline
-ceremony host / HSM that issues licenses.
+step in CI. It is used only by `tools/SSP.LicenseAuthority` on the offline
+ceremony host / HSM that issues licenses (see `docs/LICENSE_AUTHORITY.md`).
+That tool is not referenced by any shipped project and is never distributed.
 
 ---
 
@@ -62,6 +63,19 @@ license artifact verified against this compiled-in key.
    openssl pkey -pubin -in ssp-authority-public.pem -outform DER \
        | openssl dgst -sha256                    # -> record this fingerprint in the minutes
    ```
+
+   Equivalent generation / fingerprint on the **ceremony host** (never in this
+   working tree, never on a build machine):
+
+   ```powershell
+   dotnet run --project tools/SSP.LicenseAuthority -- keygen `
+       --private-key D:\ceremony\ssp-authority-private.pem `
+       --public-key  D:\ceremony\ssp-authority-public.pem
+   dotnet run --project tools/SSP.LicenseAuthority -- fingerprint `
+       --public-key D:\ceremony\ssp-authority-public.pem
+   ```
+
+   Operator reference: `docs/LICENSE_AUTHORITY.md`.
 
 2. **Escrow the private key** (HSM backup / split custody), and record in the
    minutes: date, participants, key size, algorithm, SPKI SHA-256, escrow
