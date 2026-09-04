@@ -357,17 +357,45 @@ internal static class WindowsServiceInstaller
         try
         {
             using var controller = new ServiceController(serviceName);
-            controller.Refresh();
-            if (controller.Status != ServiceControllerStatus.Running)
-                controller.WaitForStatus(ServiceControllerStatus.Running, timeout);
 
-            controller.Refresh();
-            if (controller.Status == ServiceControllerStatus.Running)
-                return true;
+            // Poll instead of WaitForStatus(Running): the target status alone
+            // cannot distinguish a slow start from a process that already
+            // FAILED. A service that reports STOPPED while we are waiting for
+            // its first start has died (SCM records the failed start; there
+            // is no recovery action configured), so waiting for the remainder
+            // of the timeout cannot change the outcome - fail fast with the
+            // observed state instead of blocking setup for the full budget.
+            var deadline = DateTime.UtcNow + timeout;
+            while (true)
+            {
+                controller.Refresh();
+                var status = controller.Status;
 
-            Console.Error.WriteLine(
-                $"[windows-service] service '{serviceName}' reached {controller.Status}, not RUNNING.");
-            return false;
+                if (status == ServiceControllerStatus.Running)
+                {
+                    return true;
+                }
+
+                if (status == ServiceControllerStatus.Stopped)
+                {
+                    Console.Error.WriteLine(
+                        $"[windows-service] service '{serviceName}' stopped before reaching RUNNING. " +
+                        "Diagnose with 'sc query' and the Windows Event Log (Application), and with " +
+                        "ssp-service-startup.log in the service directory.");
+                    return false;
+                }
+
+                if (DateTime.UtcNow >= deadline)
+                {
+                    Console.Error.WriteLine(
+                        $"[windows-service] service '{serviceName}' did not reach RUNNING state " +
+                        $"(last observed: {status}). Diagnose with 'sc query' and the Windows " +
+                        "Event Log (Application).");
+                    return false;
+                }
+
+                Thread.Sleep(250);
+            }
         }
         catch (System.ServiceProcess.TimeoutException)
         {

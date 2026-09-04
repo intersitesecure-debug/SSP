@@ -433,6 +433,14 @@ public class ServiceStartRegressionTests
     /// is present. Non-Windows and non-elevated runners retain the portable
     /// contract tests above; production installation is never downgraded to
     /// success when sc.exe reports access denied.
+    ///
+    /// P3 fail-closed note: this source tree deliberately ships WITHOUT a
+    /// compiled-in Licensing Authority trust anchor (release-key-ceremony
+    /// blocker, see SspTrustAnchor). In such a build the service host must
+    /// REFUSE to start the protected service (trust_anchor_missing), the SCM
+    /// must never report RUNNING, the gateway port must never listen, and
+    /// Setup must not claim success. The full RUNNING assertion stays in
+    /// place for builds that DO carry a trust anchor and a valid license.
     /// </summary>
     [Fact]
     public async Task SetupEngine_WhenElevated_CreatesRealRunningServiceWithListeningGateway()
@@ -462,13 +470,33 @@ public class ServiceStartRegressionTests
                 InstallWindowsService  = true,
             });
 
+            if (!SSP.Server.Activation.SspTrustAnchor.IsCompiledIn)
+            {
+                // Fail-closed contract for an unlicensed build: the created
+                // service must refuse to start the protected service, and
+                // setup must report itself incomplete instead of claiming a
+                // protected service that cannot exist.
+                Assert.False(
+                    engine.Result.Success,
+                    "An unlicensed build must not report a protected Windows service as ready.");
+
+                using var controller = new ServiceController(serviceName);
+                controller.Refresh();
+                Assert.NotEqual(ServiceControllerStatus.Running, controller.Status);
+
+                Assert.DoesNotContain(
+                    IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners(),
+                    endpoint => endpoint.Port == gatewayPort);
+                return;
+            }
+
             Assert.True(
                 engine.Result.Success,
                 "Elevated Windows setup did not create and start a ready SCM service.");
 
-            using var controller = new ServiceController(serviceName);
-            controller.Refresh();
-            Assert.Equal(ServiceControllerStatus.Running, controller.Status);
+            using var runningController = new ServiceController(serviceName);
+            runningController.Refresh();
+            Assert.Equal(ServiceControllerStatus.Running, runningController.Status);
 
             Assert.Contains(
                 IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners(),

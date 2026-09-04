@@ -148,6 +148,39 @@ public static class TunnelRelay
         // closed, sending us back through the long half-close grace period.
         var cipherPeerFinished = cipherToPlain.IsCompleted;
 
+        // EXCEPTION to the half-close grace: a tunnel peer that finished
+        // without EVER delivering a single frame is simply gone (clean EOF
+        // or a broken connection). With zero bytes received there is no
+        // response path to protect - the local application has nothing it
+        // could still usefully send to a peer that closed before speaking.
+        //
+        // This is exactly the lifecycle of the enrollment socket: it
+        // negotiates a session key (and thereby reserves a server-side
+        // licensed tunnel/session slot), and the production client then
+        // closes it without ever sending tunnel data - the data plane is a
+        // later future-authorization connection. Entering the 30-second
+        // grace period here would keep that connection - and its licensed
+        // slot - reserved for the full grace period while every plaintext
+        // read is answered by a peer that no longer exists. A dropped
+        // client must release its licensed capacity immediately, so close
+        // both directions and return.
+        if (cipherPeerFinished && await cipherToPlain.ConfigureAwait(false) == 0)
+        {
+            if (_diagnostic)
+            {
+                Console.Error.WriteLine(
+                    "[relay] tunnel peer closed before delivering any frame, closing both directions");
+            }
+
+            try { plainStream.Close(); } catch { }
+            try { cipherStream.Close(); } catch { }
+
+            try { await plainToCipher.ConfigureAwait(false); } catch { }
+
+            if (_diagnostic) Console.Error.WriteLine("[relay] both pumps finished");
+            return;
+        }
+
         if (_diagnostic)
         {
             Console.Error.WriteLine(
@@ -374,13 +407,20 @@ public static class TunnelRelay
         if (_diagnostic) Console.Error.WriteLine("[relay-lazy] both pumps finished");
     }
 
-    private static async Task PumpAsync(
+    /// <summary>
+    /// Forward plaintext from <paramref name="source"/> into the encrypted
+    /// tunnel. Returns the number of frames that were encrypted and sent, so
+    /// the bridge can tell "finished without ever carrying data" apart from
+    /// "finished after data flowed" (see <see cref="BridgeAsync"/>).
+    /// </summary>
+    private static async Task<long> PumpAsync(
         Stream source,
         TunnelCodec codec,
         Stream destination,
         CancellationToken ct,
         string direction)
     {
+        var forwarded = 0L;
         var buffer = new byte[16 * 1024];
         try
         {
@@ -396,6 +436,7 @@ public static class TunnelRelay
                 var chunk = new byte[read];
                 Buffer.BlockCopy(buffer, 0, chunk, 0, read);
                 await codec.SendAsync(destination, chunk, ct).ConfigureAwait(false);
+                forwarded++;
                 if (_diagnostic) Console.Error.WriteLine($"[relay {direction}] encrypted send = {read}");
             }
         }
@@ -406,15 +447,25 @@ public static class TunnelRelay
         {
             if (_diagnostic) Console.Error.WriteLine($"[relay {direction}] pump done");
         }
+
+        return forwarded;
     }
 
-    private static async Task PumpDecryptAsync(
+    /// <summary>
+    /// Forward decrypted tunnel frames from <paramref name="source"/> to the
+    /// plaintext side. Returns the number of frames that were received and
+    /// forwarded, so the bridge can tell "the tunnel peer closed before ever
+    /// sending anything" apart from "the peer closed after data flowed" (see
+    /// <see cref="BridgeAsync"/>).
+    /// </summary>
+    private static async Task<long> PumpDecryptAsync(
         Stream source,
         TunnelCodec codec,
         Stream destination,
         CancellationToken ct,
         string direction)
     {
+        var forwarded = 0L;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -428,6 +479,7 @@ public static class TunnelRelay
                 }
                 await destination.WriteAsync(plaintext.AsMemory(0, plaintext.Length), ct).ConfigureAwait(false);
                 await destination.FlushAsync(ct).ConfigureAwait(false);
+                forwarded++;
             }
         }
         catch (OperationCanceledException) { /* normal shutdown */ }
@@ -438,6 +490,8 @@ public static class TunnelRelay
         {
             if (_diagnostic) Console.Error.WriteLine($"[relay {direction}] decrypt pump done");
         }
+
+        return forwarded;
     }
 }
 

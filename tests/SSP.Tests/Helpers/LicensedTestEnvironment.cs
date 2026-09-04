@@ -311,6 +311,12 @@ public sealed class LicensedTestEnvironment : IDisposable
         Dictionary<string, long?>? limits = null,
         DateTimeOffset? expiresAt = null)
     {
+        // The artifact schema requires issuedAt <= notBefore (a license cannot
+        // be issued after it is already valid), so the renewal is issued the
+        // moment it becomes valid - exactly what an authority does for a
+        // renewal installed on an already-locked-down machine.
+        var notBefore = Clock.UtcNow.AddDays(-1);
+
         var renewal = new LicensedTestOptions
         {
             ApplicationName = Options.ApplicationName,
@@ -318,8 +324,8 @@ public sealed class LicensedTestEnvironment : IDisposable
             Features = features ?? Options.Features,
             Limits = limits ?? Options.Limits,
             ExpiresAt = expiresAt ?? Clock.UtcNow.AddDays(365),
-            NotBefore = Clock.UtcNow.AddDays(-1),
-            IssuedAt = Clock.UtcNow,
+            NotBefore = notBefore,
+            IssuedAt = notBefore,
             ProductId = Options.ProductId,
             InstallationId = Options.InstallationId,
             Status = LicenseStatus.Active,
