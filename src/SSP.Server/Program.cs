@@ -73,25 +73,6 @@ public static class Program
             return RunWindowsService(args[1], serviceName);
         }
 
-        // A foreground server executable first launched outside Program Files
-        // is handed off to the canonical executable through its Desktop
-        // shortcut. Keep the SERVICE MODE entry paths and the licensing
-        // diagnosis out of this flow: the SCM fast path above and --run-once
-        // must retain their existing lifecycle behaviour, and --license-status
-        // must answer from wherever the operator runs it (that is the whole
-        // point of the diagnosis when a service refuses to start).
-        var isRunOnce = args.Length >= 1 &&
-            string.Equals(args[0], "--run-once", StringComparison.Ordinal);
-        var isLicenseStatus = args.Length >= 1 &&
-            string.Equals(args[0], "--license-status", StringComparison.Ordinal);
-        var isLicenseInstall = args.Length >= 1 &&
-            string.Equals(args[0], "--install-license", StringComparison.Ordinal);
-        var isTrustAnchorInfo = args.Length >= 1 &&
-            string.Equals(args[0], "--trust-anchor-info", StringComparison.Ordinal);
-        if (!isRunOnce && !isLicenseStatus && !isLicenseInstall && !isTrustAnchorInfo &&
-            ServerInstallationBootstrapper.InstallAndLaunchSetupIfNeeded())
-            return 0;
-
         var root = new RootCommand("SSP secure tunneling server");
 
         var setupCmd = new Command("--setup", "Run interactive SETUP MODE");
@@ -179,9 +160,9 @@ public static class Program
         });
         root.Add(trustAnchorInfoCmd);
 
-        // The Desktop shortcut intentionally has no arguments, so a direct
-        // launch from the canonical executable location enters the existing
-        // interactive SETUP MODE without creating another copy or shortcut.
+        // A direct launch with no arguments enters the existing interactive
+        // SETUP MODE in the current process, from wherever the executable
+        // was launched.
         if (args.Length == 0)
             return await RunInteractiveSetupAsync() ? 0 : 1;
 
