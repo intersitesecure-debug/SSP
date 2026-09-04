@@ -311,6 +311,10 @@ public sealed class LicensedTestEnvironment : IDisposable
         Dictionary<string, long?>? limits = null,
         DateTimeOffset? expiresAt = null)
     {
+        // The reference schema requires issuedAt <= notBefore.  A renewal is
+        // issued before its validity window opens, so both are anchored to the
+        // same pre-window instant rather than issuedAt being "now".
+        var notBefore = Clock.UtcNow.AddDays(-1);
         var renewal = new LicensedTestOptions
         {
             ApplicationName = Options.ApplicationName,
@@ -318,8 +322,8 @@ public sealed class LicensedTestEnvironment : IDisposable
             Features = features ?? Options.Features,
             Limits = limits ?? Options.Limits,
             ExpiresAt = expiresAt ?? Clock.UtcNow.AddDays(365),
-            NotBefore = Clock.UtcNow.AddDays(-1),
-            IssuedAt = Clock.UtcNow,
+            NotBefore = notBefore,
+            IssuedAt = notBefore,
             ProductId = Options.ProductId,
             InstallationId = Options.InstallationId,
             Status = LicenseStatus.Active,

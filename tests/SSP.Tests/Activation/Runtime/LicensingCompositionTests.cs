@@ -345,7 +345,7 @@ public class LicensingCompositionTests
                 ApplicationName = "RDP",
                 Now = env.Clock.UtcNow,
                 NotBefore = env.Clock.UtcNow.AddMinutes(-1),
-                IssuedAt = env.Clock.UtcNow,
+                IssuedAt = env.Clock.UtcNow.AddMinutes(-1),
                 ExpiresAt = env.Clock.UtcNow.AddDays(365),
                 SequenceNumber = 9999,
             }));

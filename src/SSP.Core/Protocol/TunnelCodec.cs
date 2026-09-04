@@ -120,8 +120,11 @@ public static class TunnelRelay
         Stream cipherStream,
         CancellationToken ct = default)
     {
+        var remoteDataSeen = new RelayFlag();
         var plainToCipher = PumpAsync(plainStream, codec, cipherStream, ct, "C->S");
-        var cipherToPlain = PumpDecryptAsync(cipherStream, codec, plainStream, ct, "S->C");
+        var cipherToPlain = PumpDecryptAsync(
+            cipherStream, codec, plainStream, ct, "S->C",
+            onRemoteData: () => remoteDataSeen.Value = true);
 
         // Both directions use TCP half-close semantics.  When one side
         // finishes sending (EOF or error), the OTHER side may still have data
@@ -165,6 +168,23 @@ public static class TunnelRelay
             // stream so the local app sees EOF but can still write its
             // response; plainToCipher keeps forwarding.
             TryShutdownWrite(plainStream);
+
+            // If the peer never sent any tunnel data (a connection that was
+            // opened only to authenticate, or a client that disconnected
+            // before the first frame), there is nothing for the local
+            // application to respond to.  Close BOTH streams immediately
+            // instead of entering the 30-second half-close grace period:
+            // an empty authenticated socket must give its licensed tunnel /
+            // session slot back promptly, or every admissions test and every
+            // retry after a dropped pre-data connection would leak a slot for
+            // half a minute.
+            if (!remoteDataSeen.Value)
+            {
+                if (_diagnostic)
+                    Console.Error.WriteLine("[relay] peer closed before any tunnel data, closing both streams");
+                try { plainStream.Close(); } catch { }
+                try { cipherStream.Close(); } catch { }
+            }
         }
         else
         {
@@ -265,6 +285,8 @@ public static class TunnelRelay
         // pre-decrypted first frame into the plainToCipher pump so it
         // gets written before any further data the plain stream sends.
 
+        var remoteDataSeen = new RelayFlag();
+
         // Step 1: read the first decrypted frame from the cipher stream.
         // This blocks until the client's mstsc-equivalent sends its first
         // byte through the tunnel. Until then we do NOT touch the local
@@ -282,6 +304,7 @@ public static class TunnelRelay
                 return;
             }
             if (_diagnostic) Console.Error.WriteLine($"[relay-lazy] first frame {firstFrame.Length} bytes received, connecting to local app...");
+            remoteDataSeen.Value = true;
         }
         catch (OperationCanceledException)
         {
@@ -325,7 +348,9 @@ public static class TunnelRelay
 
         // Step 4: same lifecycle as BridgeAsync: symmetric half-close.
         var plainToCipher = PumpAsync(plainStream, codec, cipherStream, ct, "C->S");
-        var cipherToPlain = PumpDecryptAsync(cipherStream, codec, plainStream, ct, "S->C");
+        var cipherToPlain = PumpDecryptAsync(
+            cipherStream, codec, plainStream, ct, "S->C",
+            onRemoteData: () => remoteDataSeen.Value = true);
 
         await Task.WhenAny(plainToCipher, cipherToPlain).ConfigureAwait(false);
         var cipherPeerFinished = cipherToPlain.IsCompleted;
@@ -413,7 +438,8 @@ public static class TunnelRelay
         TunnelCodec codec,
         Stream destination,
         CancellationToken ct,
-        string direction)
+        string direction,
+        Action? onRemoteData = null)
     {
         try
         {
@@ -426,8 +452,10 @@ public static class TunnelRelay
                     if (_diagnostic) Console.Error.WriteLine($"[relay {direction}] cipher EOF, breaking");
                     break;
                 }
+
                 await destination.WriteAsync(plaintext.AsMemory(0, plaintext.Length), ct).ConfigureAwait(false);
                 await destination.FlushAsync(ct).ConfigureAwait(false);
+                onRemoteData?.Invoke();
             }
         }
         catch (OperationCanceledException) { /* normal shutdown */ }
@@ -438,6 +466,18 @@ public static class TunnelRelay
         {
             if (_diagnostic) Console.Error.WriteLine($"[relay {direction}] decrypt pump done");
         }
+    }
+
+    /// <summary>
+    /// A thread-safe boolean shared between the relay and its pumps. It is
+    /// used only to record whether the remote tunnel peer ever delivered a
+    /// data frame, which lets <see cref="BridgeAsync"/> release an
+    /// authenticated-but-idle connection immediately instead of holding it
+    /// through the half-close grace period.
+    /// </summary>
+    private sealed class RelayFlag
+    {
+        public volatile bool Value;
     }
 }
 
