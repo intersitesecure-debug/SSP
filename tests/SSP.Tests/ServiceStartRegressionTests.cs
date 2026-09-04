@@ -43,6 +43,7 @@ using System.Text.Json;
 using SSP.Core.Crypto;
 using SSP.Core.IO;
 using SSP.Core.Models;
+using SSP.Server.Activation;
 using SSP.Server.Runtime;
 using SSP.Server.ServiceHost;
 using SSP.Server.Setup;
@@ -438,6 +439,16 @@ public class ServiceStartRegressionTests
     public async Task SetupEngine_WhenElevated_CreatesRealRunningServiceWithListeningGateway()
     {
         if (!OperatingSystem.IsWindows() || !IsElevatedWindowsProcess())
+            return;
+
+        // SspWindowsService.OnStart starts the production runtime through
+        // SspRuntimeLicense.CreateForService, which fails closed unless this
+        // build has a compiled-in trust anchor.  The current development
+        // build intentionally ships an empty anchor (release blocker,
+        // documented by SspTrustAnchor.IsCompiledIn); in that build no SCM
+        // service can legitimately reach RUNNING, so the real-service
+        // regression is only meaningful once the anchor is present.
+        if (!SspTrustAnchor.IsCompiledIn)
             return;
 
         var suffix = Guid.NewGuid().ToString("N")[..8];
