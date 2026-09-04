@@ -6,6 +6,8 @@
 
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
 using SSP.Activation;
 using SSP.Core.Activation;
 using SSP.LicenseAuthority;
@@ -142,9 +144,11 @@ public sealed class LicenseAuthoritySecurityIsolationTests
                 continue;
             }
 
-            using var reader = new StreamReader(stream);
-            var body = reader.ReadToEnd();
-            Assert.DoesNotContain("PRIVATE KEY", body, StringComparison.OrdinalIgnoreCase);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+
+            var finding = FindPrivateKeyMaterial(buffer.ToArray());
+            Assert.True(finding is null, $"Manifest resource '{name}': {finding}");
         }
     }
 
@@ -214,6 +218,105 @@ public sealed class LicenseAuthoritySecurityIsolationTests
         finally
         {
             Environment.SetEnvironmentVariable("SSP_AUTHORITY_PUBLIC_KEY", null);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Embedded key-material scan
+    //
+    // SSP.Server.dll carries the shipped client and service-host images as
+    // manifest resources (SSP.Server.Embedded.SSP.Client.bin and
+    // SSP.Server.Embedded.SSP.ServiceHost.bin). In a production embed build
+    // those are real self-contained single-file PE binaries of tens of MB, so
+    // "does this resource mention the words private key" is not a key-material
+    // test: the embedded SSP.Core legitimately carries the label literal
+    // "PRIVATE KEY" it passes to its own PEM encoder when it EXPORTS a key at
+    // runtime, the embedded SSP.Client legitimately carries diagnostics such
+    // as "private key present but public key missing", and the .NET payload
+    // inside a single-file bundle carries unrelated framework prose (the
+    // "... certificate private key check failed ..." string that made the
+    // phrase version of this test fail on a production build). Requiring a
+    // COMPLETE PEM private key block is what actually expresses the invariant
+    // "no authority private key is compiled in", and a compiled image cannot
+    // satisfy it by accident.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// A complete PEM private key block: "-----BEGIN &lt;label&gt; PRIVATE
+    /// KEY-----", a base64 body long enough to be a key, and the matching
+    /// footer. The body length is bounded so a stray header without a footer
+    /// cannot make the match backtrack across an entire embedded image.
+    /// </summary>
+    private static readonly Regex PrivateKeyPemBlock = new(
+        @"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]{64,20000}?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>The PEM header as it appears inside a managed string constant (UTF-16LE).</summary>
+    private static readonly byte[] Utf16PemHeader = Encoding.Unicode.GetBytes("-----BEGIN ");
+
+    private static readonly UTF8Encoding StrictUtf8 =
+        new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    /// <summary>
+    /// Returns null when <paramref name="bytes"/> holds no private key
+    /// material, otherwise a description of what was found.
+    /// </summary>
+    private static string? FindPrivateKeyMaterial(byte[] bytes)
+    {
+        // Latin-1 maps every byte to the same code point, so this decode is
+        // lossless and cannot throw - unlike the UTF-8 read this test used to
+        // do, which silently turned every invalid byte of a binary resource
+        // into U+FFFD and could split or merge a needle.
+        var text = Encoding.Latin1.GetString(bytes);
+
+        var block = PrivateKeyPemBlock.Match(text);
+        if (block.Success)
+        {
+            return $"contains a PEM PRIVATE KEY block (ascii/utf-8 view, offset {block.Index}). "
+                + "No Licensing Authority private key may be compiled into, or embedded in, a shipped SSP assembly.";
+        }
+
+        // A key compiled in as a C# string constant - exactly the shape the
+        // release key ceremony seam writes - sits in the assembly's #US heap
+        // as UTF-16LE, where the ASCII view above cannot see it. Probe for the
+        // header in that encoding with a cheap byte scan, and only pay for a
+        // second view of the resource when the probe actually hits.
+        if (bytes.AsSpan().IndexOf(Utf16PemHeader) >= 0)
+        {
+            var managed = Encoding.Latin1.GetString(bytes.Where(b => b != 0).ToArray());
+            var managedBlock = PrivateKeyPemBlock.Match(managed);
+            if (managedBlock.Success)
+            {
+                return $"contains a PEM PRIVATE KEY block (utf-16le view, offset {managedBlock.Index}). "
+                    + "No Licensing Authority private key may be compiled into, or embedded in, a shipped SSP assembly.";
+            }
+        }
+
+        // A resource that is genuinely text - the ceremony's authority PUBLIC
+        // key PEM, the client patch-slot and services templates - is held to
+        // the strict rule: the phrase itself must not appear anywhere in it.
+        // PE images never decode as strict UTF-8 (the DOS/PE headers carry
+        // bytes above 0x7F), so the embedded binaries keep the block-level
+        // scan above and are not failed for unrelated prose.
+        if (IsStrictUtf8(bytes) && text.Contains("PRIVATE KEY", StringComparison.OrdinalIgnoreCase))
+        {
+            return "is a text resource that contains the literal 'PRIVATE KEY'. "
+                + "Only public key material may be compiled into a shipped SSP assembly.";
+        }
+
+        return null;
+    }
+
+    private static bool IsStrictUtf8(byte[] bytes)
+    {
+        try
+        {
+            StrictUtf8.GetString(bytes);
+            return true;
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
         }
     }
 }

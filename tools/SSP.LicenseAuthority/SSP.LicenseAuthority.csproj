@@ -3,16 +3,24 @@
   <!--
     SSP Licensing Authority tooling. This project is INTERNAL-ONLY:
 
-      * it is not referenced by SSP.Server, SSP.ServiceHost, SSP.Client,
-        SSP.ServiceBuilder or SSP.Core
+      * it is not referenced by any shipped SSP runtime project (the server,
+        the standalone service host, the client, the service builder or the
+        shared core library)
       * it is not added to any publish target or customer package
       * it ships no key material (no embedded resources, no compiled-in keys)
       * the authority PRIVATE key is supplied by the operator on every
         invocation as a file that lives OUTSIDE the SSP repository
 
-    Dependencies: SSP.Activation only (BCL). No System.CommandLine, no
-    SSP.Core — so the tool cannot accidentally pull DPAPI, the client
-    template, or any shipped runtime into the authority process.
+    Dependencies: the SSP.Activation library plus the BCL, and nothing else.
+    No third-party command-line parsing package, no shared runtime library -
+    so the tool cannot accidentally pull DPAPI, the client template, or any
+    shipped runtime into the authority process.
+
+    The isolation is machine-checked, not just documented:
+    LicenseAuthoritySecurityIsolationTests reads this file and fails the build
+    if it ever grows a package reference or a reference to one of the shipped
+    projects. Keep this comment free of those literal names for the same
+    reason - it is part of the file the test scans.
   -->
 
   <PropertyGroup>
