@@ -22,8 +22,12 @@
 // The composition root lives on the SERVER side only: SSP.Client,
 // SSP.ServiceHost and SSP.ServiceBuilder carry no activation code and no
 // reference to this type. There is no second activation authority - the trust
-// anchor above is the only root of trust, and issuance code (LicenseIssuer)
-// is never reachable from any shipped runtime path.
+// anchor above is the only root of trust, and the authority-side issuance
+// code (which lives in SSP.Activation and is only ever driven by the offline
+// licensing authority) is never reachable from any shipped runtime path.
+// LicenseAuthoritySecurityIsolationTests enforces exactly that: no shipped
+// runtime source tree may name the issuer type at all, so this comment
+// deliberately does not either.
 //
 // The composition root is also the owner of the runtime enforcement path:
 // SspRuntimeLicense delegates every gate decision back through this service's
