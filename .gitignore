@@ -59,3 +59,10 @@ nunit-*.xml
 publish/
 publish/
 publish/
+
+# Licensing Authority private keys — never commit. Key material lives
+# outside this repository (see docs/LICENSE_AUTHORITY.md).
+**/*authority-private*.pem
+**/*authority*private*.pem
+**/ssp-authority-private.pem
+**/ssp-authority-private*.pem
