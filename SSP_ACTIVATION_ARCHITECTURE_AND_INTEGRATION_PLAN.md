@@ -577,8 +577,10 @@ Deviations from the blueprint, each with reason:
    line format unchanged. Pinned by `SspSecurityEventSinkTaxonomyTests`.
 
 Verification status: as of PR #20 the full solution builds and the complete
-test suites pass (581 tests, production-embed build, Windows host). This
-session adds four taxonomy tests; no production behavior changes.
+test suites pass (581 tests, production-embed build). This session adds four
+taxonomy tests; licensing decisions and every fail-closed behavior are
+unchanged — only the Windows event-log presentation of licensing security
+events changed (stable ids + severity classes).
 
 Remaining, deliberately outside this repository: execute the release key
 ceremony on the real authority key (runbook:
