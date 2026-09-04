@@ -50,7 +50,11 @@ internal static class ServerInstallationBootstrapper
         // published executable exactly as it was launched.
         File.Copy(currentExecutablePath!, officialExecutablePath, overwrite: true);
 
-        var desktopDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        var desktopDirectory = Environment.GetEnvironmentVariable("SSP_DESKTOP_DIR");
+        if (string.IsNullOrWhiteSpace(desktopDirectory))
+        {
+            desktopDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        }
         if (string.IsNullOrWhiteSpace(desktopDirectory))
             throw new InvalidOperationException("The current user's Desktop directory could not be resolved.");
 

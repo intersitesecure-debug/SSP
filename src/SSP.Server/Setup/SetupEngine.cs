@@ -885,6 +885,12 @@ public sealed class SetupEngine
     }
 
     /// <summary>
+    /// Environment variable used to override or redirect the Desktop directory location
+    /// for setup operations (e.g., in test environments to isolate from developer's Desktop).
+    /// </summary>
+    public const string DesktopDirectoryOverrideVariable = "SSP_DESKTOP_DIR";
+
+    /// <summary>
     /// Best-effort copy of the generated Client EXE onto the Desktop of
     /// the interactive user who launched SSP.Server.exe. The original
     /// file is never moved. Failures are logged and never fail setup.
@@ -896,11 +902,15 @@ public sealed class SetupEngine
             if (string.IsNullOrWhiteSpace(clientPath) || !File.Exists(clientPath))
                 return;
 
-            var desktop = Environment.GetFolderPath(
-                Environment.SpecialFolder.DesktopDirectory,
-                Environment.SpecialFolderOption.DoNotVerify);
+            var desktop = Environment.GetEnvironmentVariable(DesktopDirectoryOverrideVariable);
             if (string.IsNullOrWhiteSpace(desktop))
-                desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            {
+                desktop = Environment.GetFolderPath(
+                    Environment.SpecialFolder.DesktopDirectory,
+                    Environment.SpecialFolderOption.DoNotVerify);
+                if (string.IsNullOrWhiteSpace(desktop))
+                    desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            }
 
             if (string.IsNullOrWhiteSpace(desktop))
             {

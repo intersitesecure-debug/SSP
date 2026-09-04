@@ -14,11 +14,13 @@
 //     appends a new event type, so the review cannot go stale silently.
 
 using System.Diagnostics;
+using System.Runtime.Versioning;
 using SSP.Activation;
 using SSP.Server.Activation;
 
 namespace SSP.Tests.Activation;
 
+[SupportedOSPlatform("windows")]
 public class SspSecurityEventSinkTaxonomyTests
 {
     [Fact]
