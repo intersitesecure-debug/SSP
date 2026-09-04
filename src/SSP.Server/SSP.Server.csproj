@@ -1,5 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    RELEASE KEY CEREMONY SEAM. Provisions the SSP Licensing Authority PUBLIC key
+    into this assembly at build time (and nothing at all in a normal developer or
+    CI build, which stays fail-closed). Imported first so its properties are in
+    scope for the nested publish targets below. See the file header and
+    TRUST_ANCHOR_KEY_CEREMONY.md.
+  -->
+  <Import Project="Activation\SspTrustAnchor.targets" />
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -205,7 +214,7 @@
           BeforeTargets="CoreCompile"
           Condition="'$(DesignTimeBuild)' != 'true' AND '$(SSP_SKIP_EMBED_EFFECTIVE)' != 'true'">
 
-    <Exec Command="dotnet publish &quot;$(ServiceHostProjectDir)/SSP.ServiceHost.csproj&quot; -c $(Configuration) -f net8.0 -r win-x64 -o &quot;$(ServiceHostPublishDir)&quot; /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true /p:IncludeAllContentForSelfExtract=true /p:EnableCompressionInSingleFile=false /p:DebugType=embedded /p:DesignTimeBuild=false /p:SSP_SKIP_EMBED=true"
+    <Exec Command="dotnet publish &quot;$(ServiceHostProjectDir)/SSP.ServiceHost.csproj&quot; -c $(Configuration) -f net8.0 -r win-x64 -o &quot;$(ServiceHostPublishDir)&quot; /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true /p:IncludeAllContentForSelfExtract=true /p:EnableCompressionInSingleFile=false /p:DebugType=embedded /p:DesignTimeBuild=false /p:SSP_SKIP_EMBED=true$(SspTrustAnchorPublishArgs)"
           ConsoleToMSBuild="true" />
 
     <Error Condition="!Exists('$(ServiceHostExePath)')"

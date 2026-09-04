@@ -1,0 +1,167 @@
+<!--
+  ============================================================================
+  SSP Licensing Authority trust anchor: RELEASE-TIME PROVISIONING
+  ============================================================================
+
+  Imported by src/SSP.Server/SSP.Server.csproj. This file is the ONLY mechanism
+  by which the SSP Licensing Authority public key enters an SSP binary.
+
+  WHAT IT DOES
+  ============
+  When the build is given a public-key PEM file, that file is embedded verbatim
+  into SSP.Server.dll as the manifest resource
+
+      SSP.Server.Activation.AuthorityPublicKey.pem
+
+  and (optionally, and strongly recommended) the SHA-256 fingerprint of its DER
+  SubjectPublicKeyInfo is recorded as assembly metadata, where the runtime
+  re-checks it. SspTrustAnchor.Create() reads only those two build artifacts.
+
+  WHEN IT DOES NOTHING
+  ====================
+  A build that does not pass SspAuthorityPublicKeyPemFile produces a binary with
+  NO trust anchor. That is the default for this repository, for every developer
+  build and for CI: SspTrustAnchor.IsCompiledIn is false, SspTrustAnchor.Create()
+  throws, SspRuntimeLicense refuses to hand out a gate, and no protected service
+  can start. This is deliberate fail-closed behaviour, not a degraded mode.
+
+  PROPERTIES (all supplied on the command line at release time; never checked in)
+  ==============================================================================
+    SspAuthorityPublicKeyPemFile
+        Path to the Licensing Authority PUBLIC key in PEM ("PUBLIC KEY") form.
+        The file must live outside this repository (ceremony media / secure
+        artifact store). Relative paths are resolved against the project
+        directory.
+
+    SspAuthorityPublicKeySha256
+        Expected lowercase-hex SHA-256 over the DER SubjectPublicKeyInfo of that
+        key, as recorded in the key-ceremony minutes. Embedded as assembly
+        metadata and enforced at runtime by SspTrustAnchor.Create(): a build that
+        embedded the wrong key fails closed instead of trusting it.
+
+    SspRequireTrustAnchor
+        Set to true for every release/publish pipeline. The build FAILS when no
+        anchor was supplied, so an unanchored binary can never be shipped by
+        accident.
+
+  RELEASE COMMAND (see TRUST_ANCHOR_KEY_CEREMONY.md for the full runbook)
+  ======================================================================
+    dotnet publish src/SSP.Server/SSP.Server.csproj -c Release ^
+        -p:PublishSingleFile=true ^
+        -p:SspRequireTrustAnchor=true ^
+        -p:SspAuthorityPublicKeyPemFile=D:\ceremony\ssp-authority-public.pem ^
+        -p:SspAuthorityPublicKeySha256=<fingerprint from the ceremony minutes>
+
+  Verify the produced binary before signing/shipping it:
+
+    SSP.Server.exe with the trust-anchor-info verb
+
+  WHAT MUST NEVER HAPPEN HERE
+  ===========================
+  * No private key. This file refuses to build if the supplied PEM contains a
+    PRIVATE KEY block, and the runtime importer refuses it a second time.
+  * No key material in the repository. Nothing under src/ or tests/ may ever
+    contain the production PEM; the ceremony passes a path to a file that lives
+    outside the working tree.
+  * No runtime substitution. There is deliberately no environment variable, app
+    setting, config file or CLI switch that supplies the anchor to a running
+    SSP process. The only input that can create authorization on a customer
+    machine is a signed license artifact verified against this compiled-in key.
+-->
+<Project>
+
+  <PropertyGroup>
+    <!-- Kept in sync with SspTrustAnchor.AuthorityPublicKeyResourceName. -->
+    <SspAuthorityPublicKeyResourceName>SSP.Server.Activation.AuthorityPublicKey.pem</SspAuthorityPublicKeyResourceName>
+
+    <!-- Normalise a relative ceremony path against the project directory so the
+         property means the same thing however the build was invoked. -->
+    <SspAuthorityPublicKeyPemFile Condition="'$(SspAuthorityPublicKeyPemFile)' != ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(SspAuthorityPublicKeyPemFile)'))</SspAuthorityPublicKeyPemFile>
+
+    <SspTrustAnchorProvisioned Condition="'$(SspAuthorityPublicKeyPemFile)' != ''">true</SspTrustAnchorProvisioned>
+    <SspTrustAnchorProvisioned Condition="'$(SspTrustAnchorProvisioned)' == ''">false</SspTrustAnchorProvisioned>
+  </PropertyGroup>
+
+  <!--
+    The nested single-file publishes launched by SSP.Server.csproj
+    (PublishClientTemplate / PublishServiceHostTemplate) are separate MSBuild
+    processes, so global properties do NOT flow into them automatically. The
+    service-host image embeds its own copy of SSP.Server.dll and IS the binary an
+    installed SSP service runs, so it must be built with the same anchor;
+    otherwise a release would ship a server that starts and a service that can
+    never validate a license. These arguments are appended to that publish.
+  -->
+  <PropertyGroup>
+    <SspTrustAnchorPublishArgs></SspTrustAnchorPublishArgs>
+    <SspTrustAnchorPublishArgs Condition="'$(SspAuthorityPublicKeyPemFile)' != ''">$(SspTrustAnchorPublishArgs) /p:SspAuthorityPublicKeyPemFile=&quot;$(SspAuthorityPublicKeyPemFile)&quot;</SspTrustAnchorPublishArgs>
+    <SspTrustAnchorPublishArgs Condition="'$(SspAuthorityPublicKeySha256)' != ''">$(SspTrustAnchorPublishArgs) /p:SspAuthorityPublicKeySha256=$(SspAuthorityPublicKeySha256)</SspTrustAnchorPublishArgs>
+    <SspTrustAnchorPublishArgs Condition="'$(SspRequireTrustAnchor)' == 'true'">$(SspTrustAnchorPublishArgs) /p:SspRequireTrustAnchor=true</SspTrustAnchorPublishArgs>
+  </PropertyGroup>
+
+  <!-- The key itself: embedded verbatim, inside the assembly image. -->
+  <ItemGroup Condition="'$(SspTrustAnchorProvisioned)' == 'true' AND Exists('$(SspAuthorityPublicKeyPemFile)')">
+    <EmbeddedResource Include="$(SspAuthorityPublicKeyPemFile)">
+      <LogicalName>$(SspAuthorityPublicKeyResourceName)</LogicalName>
+      <Visible>false</Visible>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!-- The ceremony fingerprint pin and the (path-free) provenance note. -->
+  <ItemGroup Condition="'$(SspTrustAnchorProvisioned)' == 'true' AND '$(SspAuthorityPublicKeySha256)' != ''">
+    <AssemblyMetadata Include="SspAuthorityPublicKeySha256" Value="$(SspAuthorityPublicKeySha256)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(SspTrustAnchorProvisioned)' == 'true'">
+    <AssemblyMetadata Include="SspAuthorityPublicKeySource" Value="key ceremony file $([System.IO.Path]::GetFileName('$(SspAuthorityPublicKeyPemFile)'))" />
+  </ItemGroup>
+
+  <!--
+    Build-time validation. Deliberately conservative: it can only REJECT a build,
+    never relax one. Cryptographic validation of the embedded key (SPKI parse,
+    key size, fingerprint pin) is performed by SspTrustAnchor at runtime and is
+    reported by the SSP.Server.exe trust-anchor-info verb, which is the verification
+    step the ceremony runbook requires against the actual shipped binary.
+  -->
+  <Target Name="ValidateSspTrustAnchorProvisioning"
+          BeforeTargets="BeforeBuild"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+
+    <Error Condition="'$(SspRequireTrustAnchor)' == 'true' AND '$(SspTrustAnchorProvisioned)' != 'true'"
+           Code="SSPTA001"
+           Text="This build requires an SSP Licensing Authority trust anchor (SspRequireTrustAnchor=true) but none was supplied. Pass -p:SspAuthorityPublicKeyPemFile=&lt;path to the authority PUBLIC key PEM&gt; from the release key ceremony. See TRUST_ANCHOR_KEY_CEREMONY.md." />
+
+    <Error Condition="'$(SspTrustAnchorProvisioned)' == 'true' AND !Exists('$(SspAuthorityPublicKeyPemFile)')"
+           Code="SSPTA002"
+           Text="SspAuthorityPublicKeyPemFile was set to '$(SspAuthorityPublicKeyPemFile)' but no such file exists. The trust anchor cannot be provisioned." />
+
+    <PropertyGroup Condition="'$(SspTrustAnchorProvisioned)' == 'true' AND Exists('$(SspAuthorityPublicKeyPemFile)')">
+      <_SspAuthorityPemText>$([System.IO.File]::ReadAllText('$(SspAuthorityPublicKeyPemFile)'))</_SspAuthorityPemText>
+      <_SspAuthorityPemHasPublicBlock>$(_SspAuthorityPemText.Contains('BEGIN PUBLIC KEY'))</_SspAuthorityPemHasPublicBlock>
+      <_SspAuthorityPemHasPrivateBlock>$(_SspAuthorityPemText.Contains('PRIVATE KEY'))</_SspAuthorityPemHasPrivateBlock>
+    </PropertyGroup>
+
+    <Error Condition="'$(SspTrustAnchorProvisioned)' == 'true' AND '$(_SspAuthorityPemHasPrivateBlock)' == 'true'"
+           Code="SSPTA003"
+           Text="The file passed as SspAuthorityPublicKeyPemFile contains PRIVATE KEY material. The Licensing Authority private key must never be embedded in an SSP binary. Export the PUBLIC key only (openssl rsa -pubout / -in on the HSM export) and rebuild." />
+
+    <Error Condition="'$(SspTrustAnchorProvisioned)' == 'true' AND '$(_SspAuthorityPemHasPublicBlock)' != 'true'"
+           Code="SSPTA004"
+           Text="The file passed as SspAuthorityPublicKeyPemFile does not contain a '-----BEGIN PUBLIC KEY-----' block. SSP requires the authority key as a PEM-encoded SubjectPublicKeyInfo." />
+
+    <Message Condition="'$(SspTrustAnchorProvisioned)' == 'true'"
+             Importance="high"
+             Text="[SSP.Server] Licensing Authority trust anchor provisioned from $(SspAuthorityPublicKeyPemFile) as resource $(SspAuthorityPublicKeyResourceName)" />
+
+    <Message Condition="'$(SspTrustAnchorProvisioned)' == 'true' AND '$(SspAuthorityPublicKeySha256)' != ''"
+             Importance="high"
+             Text="[SSP.Server] Trust anchor fingerprint pinned to sha256:$(SspAuthorityPublicKeySha256) (enforced at runtime)." />
+
+    <Warning Condition="'$(SspTrustAnchorProvisioned)' == 'true' AND '$(SspAuthorityPublicKeySha256)' == ''"
+             Code="SSPTA005"
+             Text="A trust anchor was embedded without SspAuthorityPublicKeySha256. Pass the fingerprint from the key-ceremony minutes so the runtime can prove the shipped binary carries the intended authority key." />
+
+    <Message Condition="'$(SspTrustAnchorProvisioned)' != 'true'"
+             Importance="normal"
+             Text="[SSP.Server] No Licensing Authority trust anchor provisioned: this build is fail-closed and cannot run a protected service. Release builds must pass -p:SspRequireTrustAnchor=true -p:SspAuthorityPublicKeyPemFile=..." />
+  </Target>
+
+</Project>

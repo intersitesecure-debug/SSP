@@ -291,33 +291,47 @@ Per-service isolation of the state machine: `AnExpiredArtifact_IsSeenByEveryServ
 * The private authority key never exists in this repo; the ephemeral test authority in
   `LicensedTestEnvironment` is in-memory only and disposed with the environment.
 
-### §11 Trust anchor — **RELEASE BLOCKER (deliberately unresolved)**
+### §11 Trust anchor — **release-time provisioning implemented; key ceremony still required**
 
-```csharp
-// src/SSP.Server/Activation/SspTrustAnchor.cs
-public const string AuthorityPublicKeyPem = "";          // empty placeholder
-public static bool IsCompiledIn => !string.IsNullOrWhiteSpace(AuthorityPublicKeyPem);
+The anchor is no longer a placeholder source constant. It is provisioned into the assembly
+at BUILD time by the release key ceremony seam
+(`src/SSP.Server/Activation/SspTrustAnchor.targets`, imported by `SSP.Server.csproj`):
+
+```
+dotnet publish src/SSP.Server/SSP.Server.csproj -c Release \
+    -p:SspRequireTrustAnchor=true \
+    -p:SspAuthorityPublicKeyPemFile=<authority-public.pem outside the repo> \
+    -p:SspAuthorityPublicKeySha256=<fingerprint from the ceremony minutes>
 ```
 
-Per instruction, **no key was invented** and **no substitution path exists**: the anchor is
-a compiled-in constant; there is no environment variable, config file, license file or
-command-line option that can supply it (`SspLicensePaths.EnvironmentRootOverrideVariable`
-redirects the *directory* only, never the key).
+The PEM is embedded verbatim as the manifest resource
+`SSP.Server.Activation.AuthorityPublicKey.pem` and the ceremony fingerprint is recorded as
+assembly metadata; `SspTrustAnchor` reads only those two build artifacts. Still **no key was
+invented** and **no substitution path exists**: there is no environment variable, config
+file, license file or command-line option that can supply the anchor to a running process
+(`SspLicensePaths.EnvironmentRootOverrideVariable` redirects the *directory* only, never the
+key), and the private key never enters the repository or any binary.
 
-Consequences, all fail-closed:
+Consequences when a build carries no anchor (the state of this repository), all fail-closed:
 
-* `SspTrustAnchor.Create()` throws `InvalidOperationException`.
+* `SspTrustAnchor.Create()` throws `InvalidOperationException`; `Inspect()` reports it.
 * `SspRuntimeLicense.CreateForService(...)` throws
   `SspActivationException(trust_anchor_missing)` → **no protected service can start in this
-  build**.
+  build**; a provisioned-but-unusable anchor throws `trust_anchor_invalid`.
 * `TryCreateForProvisioning(...)` returns `null` with a loud diagnostic; provisioning can
   lay out directories that will never run.
-* `SSP.Server --license-status` prints `UNLICENSED BUILD: no Licensing Authority trust
-  anchor is compiled into this binary` and exits non-zero.
+* `SSP.Server --license-status` prints `UNLICENSED BUILD: ...` and exits non-zero.
+* `SSP.Server --trust-anchor-info` (new) reports the anchor of the binary it is run from —
+  presence, key size, SPKI SHA-256, ceremony pin — and exits non-zero unless it is usable.
+* Release builds pass `-p:SspRequireTrustAnchor=true`, so a build with no anchor **fails**
+  (`SSPTA001`) instead of silently producing an unshippable binary.
 
-> **BLOCKER:** before any build that is meant to protect anything, set
-> `SspTrustAnchor.AuthorityPublicKeyPem` at the release key ceremony and rebuild.
-> Test: `ProductionServiceStart_FailsClosed_WhenNoTrustAnchorIsCompiledIn`.
+> **REMAINING (outside this repository):** run the key ceremony — generate the RSA-3072
+> authority key pair on the offline/HSM host, escrow the private half, publish the public
+> half + fingerprint, then build with the two properties above and verify with
+> `--trust-anchor-info`. Runbook: `TRUST_ANCHOR_KEY_CEREMONY.md`.
+> Tests: `ProductionServiceStart_FailsClosed_WhenNoTrustAnchorIsCompiledIn`,
+> `tests/SSP.Tests/Activation/SspTrustAnchorProvisioningTests.cs`.
 
 ### §12 Installation identity
 
@@ -608,7 +622,7 @@ OPERATOR DIAGNOSIS
 | 8 | Revalidation timer: one timer, no overlap, clean dispose, no stale Valid cache | ✅ §8 |
 | 9 | Lockdown propagated everywhere, no cached-bool bypass | ✅ §9 |
 | 10 | License file/state store: atomic writes, fail-closed, DPAPI, no secrets | ✅ §10 |
-| 11 | Trust anchor left as fail-closed placeholder; no invented key; release blocker documented | ✅ §11 **(BLOCKER OPEN BY DESIGN)** |
+| 11 | Trust anchor: release-time provisioning seam implemented (build-embedded public key + fingerprint pin + `--trust-anchor-info`); no invented key; ceremony documented | ✅ §11 **(key ceremony still to be executed outside the repo)** |
 | 12 | Installation identity stable, hashed, purpose-bound | ✅ §12 |
 | 13 | Connection identity isolation preserved under licensing | ✅ §13 |
 | 14 | Security events secret-free | ✅ §14 |
@@ -626,9 +640,12 @@ The two things standing between this branch and "done":
 
 1. **Run the build and the tests** (§19.2) and fix whatever the compiler finds. Until that
    happens, the 59 new test cases and the 135 vendored ones are *written*, not *passing*.
-2. **Set the real Licensing Authority public key** in `SspTrustAnchor.AuthorityPublicKeyPem`
-   at the release key ceremony. Until then every protected service correctly refuses to
-   start — which is the intended fail-closed posture, not a working product.
+2. **Run the key ceremony and build with it.** The mechanism now exists in the build
+   (`-p:SspAuthorityPublicKeyPemFile` / `-p:SspAuthorityPublicKeySha256` /
+   `-p:SspRequireTrustAnchor=true`, see `TRUST_ANCHOR_KEY_CEREMONY.md`); what remains is
+   the ceremony itself, which by design happens outside this repository. Until then every
+   protected service correctly refuses to start — the intended fail-closed posture, not a
+   working product.
 
 ---
 

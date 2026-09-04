@@ -23,6 +23,12 @@
 //   dotnet SSP.Server.dll --run-once <serviceDir>
 //       Same as --service but runs in the foreground without Windows
 //       Service plumbing. Used by integration tests on Linux.
+//
+//   dotnet SSP.Server.dll --trust-anchor-info
+//       RELEASE VERIFICATION: report the Licensing Authority trust anchor
+//       compiled into this binary (provisioned or not, key size, SPKI
+//       SHA-256 fingerprint, ceremony pin) and exit non-zero unless it is
+//       present and usable.
 
 using System.CommandLine;
 using System.ServiceProcess;
@@ -80,7 +86,10 @@ public static class Program
             string.Equals(args[0], "--license-status", StringComparison.Ordinal);
         var isLicenseInstall = args.Length >= 1 &&
             string.Equals(args[0], "--install-license", StringComparison.Ordinal);
-        if (!isRunOnce && !isLicenseStatus && !isLicenseInstall && ServerInstallationBootstrapper.InstallAndLaunchSetupIfNeeded())
+        var isTrustAnchorInfo = args.Length >= 1 &&
+            string.Equals(args[0], "--trust-anchor-info", StringComparison.Ordinal);
+        if (!isRunOnce && !isLicenseStatus && !isLicenseInstall && !isTrustAnchorInfo &&
+            ServerInstallationBootstrapper.InstallAndLaunchSetupIfNeeded())
             return 0;
 
         var root = new RootCommand("SSP secure tunneling server");
@@ -152,6 +161,23 @@ public static class Program
             ctx.ExitCode = await RunInstallLicenseAsync(file, licenseRoot) ? 0 : 1;
         });
         root.Add(installLicenseCmd);
+
+        // RELEASE VERIFICATION. Reports the Licensing Authority trust anchor
+        // this binary was built with - provisioned or not, key size, SPKI
+        // SHA-256 fingerprint and whether it matches the fingerprint pinned at
+        // the key ceremony - and exits non-zero unless the anchor is present and
+        // usable. This is the step the ceremony runbook requires against the
+        // produced binary before it is signed and shipped, and the first thing
+        // to run when a service refuses to start.
+        var trustAnchorInfoCmd = new Command(
+            "--trust-anchor-info",
+            "Report the Licensing Authority trust anchor compiled into this binary and exit");
+        trustAnchorInfoCmd.SetHandler(async ctx =>
+        {
+            await Task.CompletedTask;
+            ctx.ExitCode = RunTrustAnchorInfo() ? 0 : 1;
+        });
+        root.Add(trustAnchorInfoCmd);
 
         // The Desktop shortcut intentionally has no arguments, so a direct
         // launch from the canonical executable location enters the existing
@@ -423,9 +449,12 @@ public static class Program
         try
         {
             var paths = SspLicensePaths.Resolve(licenseRoot);
-            if (!SspTrustAnchor.IsCompiledIn)
+            var anchor = SspTrustAnchor.Inspect();
+            if (!anchor.IsUsable)
             {
-                Console.Error.WriteLine("[activation] license installation failed: no Licensing Authority trust anchor is compiled into this build.");
+                Console.Error.WriteLine(
+                    "[activation] license installation failed: this build has no usable Licensing " +
+                    $"Authority trust anchor. {anchor.Error}");
                 return false;
             }
 
@@ -458,15 +487,20 @@ public static class Program
         {
             var paths = SspLicensePaths.Resolve(licenseRoot);
 
-            if (!SspTrustAnchor.IsCompiledIn)
+            var anchor = SspTrustAnchor.Inspect();
+            if (!anchor.IsUsable)
             {
                 Console.Error.WriteLine("=== SSP LICENSE STATUS ===");
-                Console.Error.WriteLine(
-                    "UNLICENSED BUILD: no Licensing Authority trust anchor is compiled into this " +
-                    "binary (SspTrustAnchor.AuthorityPublicKeyPem is empty).");
+                Console.Error.WriteLine(anchor.IsProvisioned
+                    ? "UNUSABLE TRUST ANCHOR: the Licensing Authority public key provisioned into this " +
+                      "binary cannot be used."
+                    : "UNLICENSED BUILD: no Licensing Authority trust anchor is compiled into this " +
+                      "binary (no authority public key was provisioned at build time).");
+                Console.Error.WriteLine($"  Diagnosis          : {anchor.Error}");
                 Console.Error.WriteLine(
                     "This is fail-closed: no license can validate, so no protected SSP service can " +
-                    "start. Set the authority public key at the release key ceremony and rebuild.");
+                    "start. Set the authority public key at the release key ceremony and rebuild " +
+                    "(see TRUST_ANCHOR_KEY_CEREMONY.md).");
                 Console.Error.WriteLine($"  License file       : {paths.LicenseFilePath}");
                 Console.Error.WriteLine($"  State store        : {paths.StateStorePath}");
                 Console.Error.WriteLine($"  Security log       : {Path.Combine(paths.SecurityLogDirectory, SspSecurityEventSink.LogFileName)}");
@@ -481,6 +515,56 @@ public static class Program
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[activation] license status failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Release verification of the compiled-in root of trust. Prints the
+    /// secret-free anchor report and returns true only when this binary carries
+    /// a usable Licensing Authority public key. Internal (visible to SSP.Tests)
+    /// so the fail-closed exit contract is asserted directly.
+    /// </summary>
+    internal static bool RunTrustAnchorInfo()
+    {
+        try
+        {
+            var info = SspTrustAnchor.Inspect();
+            var output = info.IsUsable ? Console.Out : Console.Error;
+            output.Write(info.Describe());
+
+            if (info.IsUsable)
+            {
+                if (!info.MeetsRecommendedKeySize)
+                {
+                    Console.Error.WriteLine(
+                        $"[activation] WARNING: the anchored key is weaker than the {SspTrustAnchor.RecommendedKeySizeBits}-bit " +
+                        "key the SSP key ceremony mandates.");
+                }
+
+                if (string.IsNullOrEmpty(info.PinnedPublicKeySha256))
+                {
+                    Console.Error.WriteLine(
+                        "[activation] WARNING: this build records no ceremony fingerprint " +
+                        "(-p:SspAuthorityPublicKeySha256 was not passed), so the runtime cannot prove " +
+                        "the embedded key is the intended one. Compare the SPKI SHA-256 above with the " +
+                        "key-ceremony minutes by hand.");
+                }
+
+                return true;
+            }
+
+            Console.Error.WriteLine(
+                "[activation] This binary is fail-closed: no protected SSP service can start. " +
+                "Rebuild with -p:SspRequireTrustAnchor=true -p:SspAuthorityPublicKeyPemFile=<authority-public.pem> " +
+                "-p:SspAuthorityPublicKeySha256=<fingerprint> (see TRUST_ANCHOR_KEY_CEREMONY.md).");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            // Inspect() is written not to throw; if it somehow does, report the
+            // build as unusable rather than as verified.
+            Console.Error.WriteLine($"[activation] trust anchor inspection failed: {ex.Message}");
             return false;
         }
     }
