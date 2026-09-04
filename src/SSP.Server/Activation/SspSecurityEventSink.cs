@@ -17,7 +17,8 @@ namespace SSP.Server.Activation;
 /// Persistent licensing security event sink. Emits one line per event to a
 /// local log file inside the supplied directory (when provided), optionally
 /// mirrors the same line to stdout for foreground/operator runs, and writes a
-/// best-effort entry to the Windows Application event log.
+/// best-effort entry to the Windows Application event log under the stable
+/// taxonomy in <see cref="LicensingEventLogTaxonomy"/>.
 /// </summary>
 public sealed class SspSecurityEventSink : ISecurityEventSink
 {
@@ -71,7 +72,7 @@ public sealed class SspSecurityEventSink : ISecurityEventSink
                 }
 
                 TryWriteFile(line);
-                TryWriteWindowsEventLog(line);
+                TryWriteWindowsEventLog(securityEvent, line);
             }
         }
         catch
@@ -144,7 +145,7 @@ public sealed class SspSecurityEventSink : ISecurityEventSink
         }
     }
 
-    private static void TryWriteWindowsEventLog(string line)
+    private static void TryWriteWindowsEventLog(LicenseSecurityEvent securityEvent, string line)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -158,11 +159,87 @@ public sealed class SspSecurityEventSink : ISecurityEventSink
                 System.Diagnostics.EventLog.CreateEventSource(EventSource, "Application");
             }
 
-            System.Diagnostics.EventLog.WriteEntry(EventSource, line, System.Diagnostics.EventLogEntryType.Information);
+            System.Diagnostics.EventLog.WriteEntry(
+                EventSource,
+                line,
+                LicensingEventLogTaxonomy.EntryTypeFor(securityEvent.EventType),
+                LicensingEventLogTaxonomy.EventIdFor(securityEvent.EventType));
         }
         catch
         {
             // Best effort only; never throw from a security event sink.
         }
     }
+}
+
+/// <summary>
+/// Windows Application event-log taxonomy for SSP licensing security events.
+///
+/// P5 hardening (event-log taxonomy review): every
+/// <see cref="LicenseSecurityEventType"/> maps to a STABLE event id and an
+/// operator-meaningful entry type, so licensing denials can be filtered and
+/// alerted on in the event log instead of all arriving as plain Information
+/// entries with no id (the pre-review behaviour).
+///
+/// The mapping is part of the operational contract:
+///   * ids are never renumbered and severity is never raised or lowered for an
+///     existing event type - operators may bind alerting to these ids;
+///   * the library appends enum members only, and the exhaustive switch below
+///     fails compilation (CS8509) when a new event type appears, which forces
+///     this taxonomy to be reviewed before the new type can ship.
+///
+/// Event ids: <see cref="EventIdBase"/> + the enum value, i.e.
+/// LicenseLoaded = 4601 ... ProtectedOperationDenied = 4611. The base sits
+/// outside the system-defined range so SSP licensing events can never collide
+/// with SCM / ServiceBase / .NET runtime entries. The source name is
+/// "SSP.Server", the same Application-log source ServiceDiagnostics writes
+/// startup failures under, so one source name covers the whole server.
+///
+/// Severity classes:
+///   Information - normal lifecycle transitions: license loaded, validated,
+///     lockdown cleared, a newer artifact superseding an older one.
+///   Warning     - every operator-actionable denial state: validation failure,
+///     invalid signature, expiry, installation binding failure, revocation,
+///     lockdown activation and every protected-operation denial.
+///   Error       - deliberately never used. The sink contract is best-effort
+///     and a licensing denial is an operational state, not a crash; Error-level
+///     service failures (including SspActivationException at startup) are
+///     surfaced separately by ServiceDiagnostics with its own contract.
+///
+/// The file/console line format is a second, equally stable taxonomy
+/// ("ssp-activation event=... state=... reason=...", see
+/// <see cref="SspSecurityEventSink.BuildMessage"/>); this mapping governs only
+/// the Windows event-log presentation of the same events.
+/// </summary>
+internal static class LicensingEventLogTaxonomy
+{
+    /// <summary>Base of the SSP licensing event-id range in the Windows Application log.</summary>
+    public const int EventIdBase = 4600;
+
+    /// <summary>
+    /// Stable, documented event id for a licensing security event type.
+    /// Never renumber an existing mapping.
+    /// </summary>
+    public static int EventIdFor(LicenseSecurityEventType eventType) => EventIdBase + (int)eventType;
+
+    /// <summary>
+    /// Operator-meaningful Windows event-log entry type for a licensing
+    /// security event type. Exhaustive by construction: adding a member to
+    /// <see cref="LicenseSecurityEventType"/> fails compilation until this
+    /// taxonomy decides the new member's severity.
+    /// </summary>
+    public static System.Diagnostics.EventLogEntryType EntryTypeFor(LicenseSecurityEventType eventType) => eventType switch
+    {
+        LicenseSecurityEventType.LicenseLoaded => System.Diagnostics.EventLogEntryType.Information,
+        LicenseSecurityEventType.LicenseValidated => System.Diagnostics.EventLogEntryType.Information,
+        LicenseSecurityEventType.LicenseValidationFailed => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.InvalidSignature => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.LicenseExpired => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.LicenseBindingFailed => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.LicenseRevoked => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.LicenseLockdownActivated => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.LicenseLockdownCleared => System.Diagnostics.EventLogEntryType.Information,
+        LicenseSecurityEventType.LicenseSuperseded => System.Diagnostics.EventLogEntryType.Information,
+        LicenseSecurityEventType.ProtectedOperationDenied => System.Diagnostics.EventLogEntryType.Warning,
+    };
 }

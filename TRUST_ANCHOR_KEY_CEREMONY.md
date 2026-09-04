@@ -120,7 +120,46 @@ Authenticode-sign the binaries. A quick negative check on the shipped package
 Select-String -Path <package>\* -Pattern "PRIVATE KEY" -SimpleMatch   # must find nothing
 ```
 
-## 5. Rotation
+## 5. Authenticode signing of the shipped binaries (P5 guidance)
+
+Signing is the *last* step: only after §4's anchor verification passes may a
+binary be signed. Everything the release ships — `SSP.Server.exe` and the
+embedded `SSP.ServiceHost`/`SSP.Client` single-file images it carries — must
+carry a valid Authenticode signature, so a customer (and Windows itself) can
+distinguish a genuine SSP binary from a substituted one. The signature is an
+integrity/tamper-evidence control on top of licensing; it is not a licensing
+input and is never read by the runtime.
+
+Minimum requirement, per binary:
+
+```powershell
+signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a <binary>.exe
+```
+
+* `/fd SHA256` — SHA-256 file digest (required; SHA-1 must not appear).
+* `/tr` + `/td SHA256` — an RFC 3161 timestamp so the signature verifies after
+  the certificate expires.
+* `/a` — best certificate in the store; in CI, select explicitly
+  (`/sha1 <thumbprint>`) or use Azure Trusted Signing so the key never touches
+  a build machine.
+
+Verification before distribution, per binary:
+
+```powershell
+$sig = Get-AuthenticodeSignature <binary>.exe
+$sig.Status      # must be Valid (not UnknownError / NotSigned / HashMismatch)
+$sig.SignerCertificate   # must be the release certificate, not a test one
+```
+
+Checklist placement: append both commands to the §4 verification run; a binary
+that fails `--trust-anchor-info` (§4) is rebuilt, never signed; a binary whose
+signature does not verify is withdrawn, never distributed. Keep the code-signing
+certificate out of ordinary CI secrets where policy allows (hardware token or
+Trusted Signing); the signing step consumes no licensing key material and the
+licensing build consumes no signing material — the two trust chains are
+deliberately disjoint.
+
+## 6. Rotation
 
 The library ships **one** anchor. To rotate: build a release carrying the new
 public key, re-issue every live license with the new private key **before** the
@@ -128,7 +167,7 @@ old-anchor build is retired (sequence numbers stay monotonic so anti-rollback is
 unaffected), then withdraw the old build. Multi-anchor support is an explicit
 future library change and is deliberately not improvised at ceremony time.
 
-## 6. Test / development keys
+## 7. Test / development keys
 
 Tests generate **ephemeral in-memory** authority keys (`LicensedTestEnvironment`,
 `SspActivationService.Compose(...)`) and never write key material to disk or to
