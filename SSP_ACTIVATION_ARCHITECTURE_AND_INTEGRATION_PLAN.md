@@ -514,3 +514,76 @@ Phase-gate: reference suite compiles+passes as-is (its 9 invariants, concurrency
 ---
 
 *End of report. Nothing in this phase modified source, projects, the solution, or git state; one report file was updated. No code follows this analysis.*
+
+---
+
+# AS-BUILT STATUS (recorded after P0–P5, 2026-09-04)
+
+Per Definition-of-Done item 9, this blueprint is now updated to as-built. Every
+deviation from the blueprint above is recorded here with its reason; anything
+not listed was built exactly as specified.
+
+| Phase | Outcome |
+| --- | --- |
+| P0 | `src/SSP.Activation` vendored verbatim from `_reference/SSP.Activation`; only the csproj carries the documented `DebugType=embedded` compile fix. Reference test suite lives in `tests/SSP.Activation.Tests` (135 declarations, verbatim) and is part of `SSP.sln`. |
+| P1 | SSP-native adapters as specified: `SspLicensePaths`, `SspInstallationIdentityProvider`, `SspLicenseStateStore`, `SspSecurityEventSink`, `SspLicensing` constants, one additive `ProtectedFileStore` name. |
+| P2 | Composition root (`SspActivationService`) + operator CLI (`--license-status`, `--install-license` via `SspLicenseInstaller`, `--trust-anchor-info`). |
+| P3 | Runtime gating at EP0a/EP0b/EP1/EP2/EP3/EP-T as specified. |
+| P4 | `tools/SSP.LicenseAuthority` (keygen/export-public/fingerprint/issue/renew/inspect/verify), `docs/LICENSE_AUTHORITY.md`, `TRUST_ANCHOR_KEY_CEREMONY.md`, `LICENSING_LIMITS_AND_RESOURCE_SEMANTICS.md`. |
+| P5 | `docs/THREAT_MODEL.md` (sign-off), event-log taxonomy (below), Authenticode guidance (`TRUST_ANCHOR_KEY_CEREMONY.md` §5); `LicenseIssuer` hard-split declined (below). |
+
+Deviations from the blueprint, each with reason:
+
+1. **Dev builds are fail-closed, not unmanaged-permissive.** §6's "preservation
+   seam" (dev builds run with gates allowing + one loud event) was NOT built.
+   As built: a build without a compiled-in anchor refuses every protected
+   operation — `SspRuntimeLicense.CreateForService` throws
+   `trust_anchor_missing`, `TryCreateForProvisioning` returns null with a loud
+   diagnostic. Reason: the 33 pre-existing suites were preserved without it by
+   giving the test harness an explicit gate seam (`UnlicensedTestGate`, test
+   assembly only), so the permissive mode would have existed solely as a
+   production bypass primitive. Recorded as build-time trust decision #1 in
+   `docs/THREAT_MODEL.md`.
+2. **`ActivationGate.cs` became `ISspLicenseGate.cs` + `SspRuntimeLicense.cs`.**
+   Reason: the gate must own the usage counters and perform check-and-reserve
+   atomically (P3 §6); an interface + admission token (`SspTunnelAdmission`)
+   expresses that ownership without the runtime components ever touching the
+   counters. Enforcement semantics match §G exactly.
+3. **The trust anchor is not a source constant.** Blueprint §7.C said
+   "compiled production anchor constant"; as built, `SspTrustAnchor.targets`
+   provisions the anchor into the assembly at release build time
+   (embedded-resource PEM + assembly-metadata fingerprint pin, `SSPTA001`–`SSPTA005`),
+   and no build of this repository embeds one by default. Reason: a source
+   constant would have committed key material to the tree and made the
+   ceremony un-auditable; the MSBuild seam keeps the public key outside the
+   repository until a release pipeline supplies it. Runtime re-verifies SPKI
+   SHA-256 against the pin and fails closed on mismatch.
+4. **`--install-license` + `SspLicenseInstaller`** were added beyond §7.C's
+   `--license-status` (P4 scope), as the operator install path the authority
+   runbook requires (validate-before-replace, atomic).
+5. **`max_sessions` remains declared but unenforced** (reserved seam).
+   Reason recorded in `LICENSING_LIMITS_AND_RESOURCE_SEMANTICS.md` §9: a
+   cumulative total cannot be measured offline across restarts without a
+   persisted per-license counter; enforcing it against a per-process total
+   would silently change the limit's meaning. Deliberate.
+6. **`LicenseIssuer` hard-split (P5, optional) declined.** Reason: the
+   boundary is machine-enforced (`LicenseAuthoritySecurityIsolationTests`
+   scans every shipped source tree and every shipped assembly), the issuer
+   holds no key, and a split would break the verbatim-vendoring invariant for
+   no safety gain. Decision recorded in `docs/THREAT_MODEL.md` §6.
+7. **Event-log taxonomy (P5).** `SspSecurityEventSink` now writes Windows
+   Application-log entries under stable event ids 4601–4611 with
+   operator-meaningful severities (`LicensingEventLogTaxonomy`); file/console
+   line format unchanged. Pinned by `SspSecurityEventSinkTaxonomyTests`.
+
+Verification status: as of PR #20 the full solution builds and the complete
+test suites pass (581 tests, production-embed build). This session adds four
+taxonomy tests; licensing decisions and every fail-closed behavior are
+unchanged — only the Windows event-log presentation of licensing security
+events changed (stable ids + severity classes).
+
+Remaining, deliberately outside this repository: execute the release key
+ceremony on the real authority key (runbook:
+`TRUST_ANCHOR_KEY_CEREMONY.md`), run release builds with
+`SspRequireTrustAnchor=true`, and rotate per the runbook. Multi-anchor/key-id
+rotation and online revocation remain documented future library changes.
