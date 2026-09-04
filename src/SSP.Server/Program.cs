@@ -78,7 +78,9 @@ public static class Program
             string.Equals(args[0], "--run-once", StringComparison.Ordinal);
         var isLicenseStatus = args.Length >= 1 &&
             string.Equals(args[0], "--license-status", StringComparison.Ordinal);
-        if (!isRunOnce && !isLicenseStatus && ServerInstallationBootstrapper.InstallAndLaunchSetupIfNeeded())
+        var isLicenseInstall = args.Length >= 1 &&
+            string.Equals(args[0], "--install-license", StringComparison.Ordinal);
+        if (!isRunOnce && !isLicenseStatus && !isLicenseInstall && ServerInstallationBootstrapper.InstallAndLaunchSetupIfNeeded())
             return 0;
 
         var root = new RootCommand("SSP secure tunneling server");
@@ -132,6 +134,24 @@ public static class Program
             ctx.ExitCode = await RunLicenseStatusAsync(licenseRoot) ? 0 : 1;
         });
         root.Add(licenseStatusCmd);
+
+        // Validate an artifact completely before atomically replacing the
+        // canonical installed license. Invalid artifacts never touch the
+        // currently installed license.
+        var installLicenseFileArg = new Argument<string>("file", "Path to a signed SSP license artifact.");
+        var installLicenseRootOpt = new Option<string?>(
+            "--license-root",
+            "Optional licensing directory override (defaults to SSP_LICENSE_ROOT, then the canonical product root).");
+        var installLicenseCmd = new Command("--install-license", "Validate and install a license artifact");
+        installLicenseCmd.AddArgument(installLicenseFileArg);
+        installLicenseCmd.AddOption(installLicenseRootOpt);
+        installLicenseCmd.SetHandler(async ctx =>
+        {
+            var file = ctx.ParseResult.GetValueForArgument(installLicenseFileArg);
+            var licenseRoot = ctx.ParseResult.GetValueForOption(installLicenseRootOpt);
+            ctx.ExitCode = await RunInstallLicenseAsync(file, licenseRoot) ? 0 : 1;
+        });
+        root.Add(installLicenseCmd);
 
         // The Desktop shortcut intentionally has no arguments, so a direct
         // launch from the canonical executable location enters the existing
@@ -398,6 +418,38 @@ public static class Program
     /// the paths in use). Never starts a protected service and never starts the
     /// periodic refresh: this is a one-shot query.
     /// </summary>
+    private static async Task<bool> RunInstallLicenseAsync(string sourcePath, string? licenseRoot)
+    {
+        try
+        {
+            var paths = SspLicensePaths.Resolve(licenseRoot);
+            if (!SspTrustAnchor.IsCompiledIn)
+            {
+                Console.Error.WriteLine("[activation] license installation failed: no Licensing Authority trust anchor is compiled into this build.");
+                return false;
+            }
+
+            using var activation = SspActivationService.Create(paths);
+            var result = await SspLicenseInstaller.InstallAsync(activation, sourcePath);
+            if (!result.IsValid)
+            {
+                // Keep the status vocabulary and secret-free diagnostics used by
+                // --license-status; importantly, the target was not replaced.
+                Console.Error.WriteLine($"[activation] license rejected: {result.State} ({result.ReasonCode}): {result.Detail}");
+                return false;
+            }
+
+            Console.WriteLine($"License installed: {paths.LicenseFilePath}");
+            Console.WriteLine($"State: {result.State} ({result.ReasonCode})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[activation] license installation failed: {ex.Message}");
+            return false;
+        }
+    }
+
     private static async Task<bool> RunLicenseStatusAsync(string? licenseRoot)
     {
         await Task.CompletedTask;
