@@ -131,13 +131,28 @@ public sealed class SspRuntimeLicense : ISspLicenseGate, IDisposable
             // Fail closed. There is no root of trust in this build, so no
             // artifact could ever validate and no protected operation may be
             // authorized. This is a release blocker, not a runtime mode: the
-            // anchor is a compiled-in constant that no environment variable,
-            // config file, license file or command line can supply.
+            // anchor is provisioned into the binary at the release key ceremony
+            // and no environment variable, config file, license file or command
+            // line can supply it.
             throw new SspActivationException(
                 SspActivationException.TrustAnchorMissingReason,
                 "SSP cannot start a protected service: this build has no Licensing Authority " +
-                "trust anchor compiled in (SspTrustAnchor.AuthorityPublicKeyPem is empty). " +
+                "trust anchor compiled in (no authority public key was provisioned at build time). " +
                 "Set the authority public key at the release key ceremony and rebuild.");
+        }
+
+        var anchorStatus = SspTrustAnchor.Inspect();
+        if (!anchorStatus.IsUsable)
+        {
+            // An anchor IS present but cannot be used (malformed, too weak, or
+            // it does not match the fingerprint recorded at the key ceremony).
+            // Refusing here - rather than letting composition fail with a
+            // generic error - keeps the diagnosis precise and the behaviour
+            // identical to having no anchor at all: nothing is authorized.
+            throw new SspActivationException(
+                SspActivationException.TrustAnchorInvalidReason,
+                "SSP cannot start a protected service: the Licensing Authority trust anchor " +
+                $"provisioned into this build is unusable. {anchorStatus.Error}");
         }
 
         SspActivationService activation;
@@ -196,6 +211,16 @@ public sealed class SspRuntimeLicense : ISspLicenseGate, IDisposable
                 "Provisioning-time license limit checks (max_services / max_clients) are unavailable; " +
                 "the runtime gates remain fail-closed and a provisioned service will not start " +
                 "without a valid license.");
+            return null;
+        }
+
+        var anchorStatus = SspTrustAnchor.Inspect();
+        if (!anchorStatus.IsUsable)
+        {
+            Console.Error.WriteLine(
+                "[activation] The Licensing Authority trust anchor provisioned into this build is " +
+                $"unusable: {anchorStatus.Error} Provisioning is denied and the runtime gates remain " +
+                "fail-closed.");
             return null;
         }
 

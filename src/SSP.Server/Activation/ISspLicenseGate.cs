@@ -192,6 +192,14 @@ public sealed class SspActivationException : Exception
     /// <summary>SSP-specific reason code for a missing compiled-in trust anchor.</summary>
     public const string TrustAnchorMissingReason = "trust_anchor_missing";
 
+    /// <summary>
+    /// SSP-specific reason code for a build whose provisioned trust anchor is
+    /// unusable: malformed PEM, key below the minimum size, or a key that does
+    /// not match the fingerprint recorded at the release key ceremony. Treated
+    /// exactly like a missing anchor - no protected operation is authorized.
+    /// </summary>
+    public const string TrustAnchorInvalidReason = "trust_anchor_invalid";
+
     /// <summary>SSP-specific reason code for a licensing subsystem that failed to compose.</summary>
     public const string CompositionFailedReason = "activation_composition_failed";
 

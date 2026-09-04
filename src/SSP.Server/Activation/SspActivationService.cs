@@ -467,6 +467,7 @@ public sealed class SspActivationService : IDisposable
         }
 
         builder.AppendLine($"  Product            : {SspLicensing.ProductName} ({SspLicensing.ProductId:D})");
+        builder.AppendLine($"  Trust anchor       : {DescribeTrustAnchor()}");
         builder.AppendLine($"  Installation id    : {identity}");
         if (license is not null)
         {
@@ -489,6 +490,26 @@ public sealed class SspActivationService : IDisposable
         builder.AppendLine($"  State store        : {Paths.StateStorePath}");
         builder.AppendLine($"  Security log       : {Path.Combine(Paths.SecurityLogDirectory, SspSecurityEventSink.LogFileName)}");
         return builder.ToString();
+    }
+
+    /// <summary>
+    /// Secret-free identification of the root of trust actually wired into this
+    /// runtime: key size plus the SHA-256 of its DER SubjectPublicKeyInfo. The
+    /// fingerprint is what an operator compares against the key-ceremony
+    /// minutes; the key material itself is never printed (it is public, but a
+    /// status report is not a key-distribution channel).
+    /// </summary>
+    private string DescribeTrustAnchor()
+    {
+        try
+        {
+            return $"rsa-{_trustAnchor.KeySizeBits} sha256:{SspTrustAnchor.ComputeFingerprint(_trustAnchor)}";
+        }
+        catch
+        {
+            // Diagnostics must never fail a status report.
+            return "(unavailable)";
+        }
     }
 
     private string SafeIdentity()
