@@ -55,9 +55,9 @@ public sealed class SspLicenseInstallerTests
     }
 
     [Theory]
-    [InlineData(-1, 1)] // expired at the validation clock
-    [InlineData(1, -1)] // not yet valid at the validation clock
-    public async Task InstallAsync_InvalidValidityWindow_IsRejected(int expiryOffset, int notBeforeOffset)
+    [InlineData(-1, 0)] // expired at the validation clock
+    [InlineData(0, 1)]  // not yet valid at the validation clock
+    public async Task InstallAsync_InvalidValidityWindow_IsRejected(int expiryOffsetHours, int notBeforeOffsetHours)
     {
         using var authority = RSA.Create(2048);
         var dir = TempDir();
@@ -68,10 +68,10 @@ public sealed class SspLicenseInstallerTests
             File.WriteAllText(paths.LicenseFilePath, existing);
             using var service = Compose(paths, authority);
             var candidate = Payload(sequence: 2);
-            if (expiryOffset < 0)
-                candidate = candidate with { ExpiresAt = Now.AddHours(-1) };
-            else
-                candidate = candidate with { NotBefore = Now.AddHours(1) };
+            if (expiryOffsetHours != 0)
+                candidate = candidate with { ExpiresAt = Now.AddHours(expiryOffsetHours) };
+            if (notBeforeOffsetHours != 0)
+                candidate = candidate with { NotBefore = Now.AddHours(notBeforeOffsetHours) };
             var source = Path.Combine(dir, "incoming.json");
             File.WriteAllText(source, Issue(authority, candidate));
 

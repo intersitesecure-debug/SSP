@@ -70,7 +70,11 @@ internal static class ClientInstallationBootstrapper
         // re-enroll (and does not burn its one-time token again).
         MigrateConnectionState(launchedExecutablePath, canonicalDirectory);
 
-        var desktopDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        var desktopDirectory = Environment.GetEnvironmentVariable("SSP_DESKTOP_DIR");
+        if (string.IsNullOrWhiteSpace(desktopDirectory))
+        {
+            desktopDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        }
         if (string.IsNullOrWhiteSpace(desktopDirectory))
             throw new InvalidOperationException("The current user's Desktop directory could not be resolved.");
 

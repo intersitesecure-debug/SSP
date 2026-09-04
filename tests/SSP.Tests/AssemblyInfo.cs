@@ -42,5 +42,11 @@ internal static class TestAssemblyInit
         Environment.SetEnvironmentVariable(
             ClientInstallPaths.EnvironmentRootOverrideVariable,
             Path.Combine(Path.GetTempPath(), "ssp-client-root-tests"));
+
+        // Redirect the Desktop copy destination away from the real developer
+        // Desktop so test execution (dotnet test) never pollutes the Desktop.
+        Environment.SetEnvironmentVariable(
+            SSP.Server.Setup.SetupEngine.DesktopDirectoryOverrideVariable,
+            Path.Combine(Path.GetTempPath(), "ssp-desktop-tests"));
     }
 }

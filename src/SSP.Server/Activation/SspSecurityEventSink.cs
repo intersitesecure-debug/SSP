@@ -8,6 +8,7 @@
 // Implementation never throws - a logging failure must never take down
 // licensing validation or the service.
 
+using System.Runtime.Versioning;
 using System.Text;
 using SSP.Activation;
 
@@ -211,6 +212,7 @@ public sealed class SspSecurityEventSink : ISecurityEventSink
 /// <see cref="SspSecurityEventSink.BuildMessage"/>); this mapping governs only
 /// the Windows event-log presentation of the same events.
 /// </summary>
+[SupportedOSPlatform("windows")]
 internal static class LicensingEventLogTaxonomy
 {
     /// <summary>Base of the SSP licensing event-id range in the Windows Application log.</summary>
@@ -241,5 +243,6 @@ internal static class LicensingEventLogTaxonomy
         LicenseSecurityEventType.LicenseLockdownCleared => System.Diagnostics.EventLogEntryType.Information,
         LicenseSecurityEventType.LicenseSuperseded => System.Diagnostics.EventLogEntryType.Information,
         LicenseSecurityEventType.ProtectedOperationDenied => System.Diagnostics.EventLogEntryType.Warning,
+        _ => System.Diagnostics.EventLogEntryType.Warning,
     };
 }
