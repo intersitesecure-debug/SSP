@@ -1,0 +1,90 @@
+<Project>
+
+  <!--
+  ============================================================================
+  SSP: solution-wide NuGet restore policy
+  ============================================================================
+
+  Imported by every project in the repository before its own PropertyGroup
+  elements (the Directory.Build.props convention), so one place governs restore
+  behaviour for src/, tests/ and the vendored _reference/ tree. Nothing here
+  changes how C# code is compiled: each project keeps its own
+  TreatWarningsAsErrors, Nullable and analyzer settings.
+
+  WHY THIS FILE EXISTS
+  ====================
+  Since the .NET 8 SDK, NuGet performs a package vulnerability audit during
+  restore (NuGetAudit, on by default). The audit downloads an advisory feed
+  from every configured source. When that feed cannot be reached (offline
+  workstation, air-gapped or proxy filtered CI that can serve the packages
+  themselves but not the advisory index) the failure is reported as:
+
+      NU1900: Error occurred while getting package vulnerability data:
+              Unable to load the service index for source
+              https://api.nuget.org/v3/index.json.
+
+  NU1900 says nothing about the dependencies. The package graph resolves
+  correctly and restore would succeed on its own; the diagnostic describes an
+  optional enhancement. But it is still emitted at warning level, and
+  TreatWarningsAsErrors=true (src/SSP.Activation and
+  tests/SSP.Activation.Tests) escalates every warning, including this network
+  artifact, into an error. That fails "dotnet restore", "dotnet build" and
+  "dotnet test" although the repository contains no defect.
+
+  The escalation is by design and is not a bug to work around in code:
+  NuGet.targets passes TreatWarningsAsErrors, WarningsAsErrors,
+  WarningsNotAsErrors and NoWarn into the restore task, so the same four
+  properties that govern the compiler also govern NU19xx restore diagnostics,
+  and NoWarn is evaluated before the escalation (suppressing a code wins over
+  promoting one).
+
+  WHAT THIS FILE DOES
+  ===================
+  * NU1900 is removed from restore output. "The advisory feed was unreachable"
+    is not actionable in source code, so it must not be a build failure and it
+    is not worth a warning line on every restore either.
+  * NU1901 to NU1904 (real advisories: low, moderate, high and critical severity
+    against a direct dependency) are still printed, but are exempted from the
+    warnings as errors escalation, so a disclosure published after the fact
+    against, say, a test stack package cannot break every build of the product.
+  * The audit stays ENABLED at its default breadth (NuGetAuditMode=direct for
+    net8.0 targets) and default severity floor (NuGetAuditLevel=low): whenever
+    the feed is reachable, vulnerable packages are reported exactly as before,
+    and the vulnerable package report of the dotnet CLI keeps working.
+
+  A CI job with a guaranteed feed that wants advisories to be fatal can
+  re-enable the hard gate per invocation with /p:WarningsNotAsErrors=, and a
+  job that wants no audit traffic at all can use /p:NuGetAudit=false.
+  See BUILD.md for the offline build and test workflow.
+  -->
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);NU1900</NoWarn>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
+  </PropertyGroup>
+
+  <!--
+  ============================================================================
+  SSP: SSP_SKIP_EMBED normalisation
+  ============================================================================
+
+  SSP_SKIP_EMBED is the switch src/SSP.Server/SSP.Server.csproj uses to embed
+  the framework dependent SSP.Client.dll instead of re publishing SSP.Client and
+  SSP.ServiceHost as self contained single-file win-x64 images. Those two nested
+  publishes are the only steps of a normal build that require a package feed
+  beyond the projects' own dependencies (the win-x64 runtime packs), so this
+  switch is the supported way to build and test offline.
+
+  The repository documented both spellings of the switch (SSP_SKIP_EMBED=1 in
+  prose, SSP_SKIP_EMBED=true in the MSBuild conditions), and the conditions
+  compared against the literal 'true', so the numeric form was silently ignored
+  and the recursive publish ran anyway. Normalising here, in a file that both
+  the outer build and every nested publish evaluate, makes all truthy spellings
+  mean the same thing whether they arrive as an environment variable or as a
+  global property. Read SSP_SKIP_EMBED_EFFECTIVE, never the raw variable.
+  -->
+  <PropertyGroup>
+    <SSP_SKIP_EMBED_EFFECTIVE Condition="'$(SSP_SKIP_EMBED)' == 'true' OR '$(SSP_SKIP_EMBED)' == '1' OR '$(SSP_SKIP_EMBED)' == 'yes'">true</SSP_SKIP_EMBED_EFFECTIVE>
+    <SSP_SKIP_EMBED_EFFECTIVE Condition="'$(SSP_SKIP_EMBED_EFFECTIVE)' == ''">$(SSP_SKIP_EMBED)</SSP_SKIP_EMBED_EFFECTIVE>
+  </PropertyGroup>
+
+</Project>

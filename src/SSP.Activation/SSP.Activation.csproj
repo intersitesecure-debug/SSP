@@ -39,4 +39,27 @@
     <DebugType>embedded</DebugType>
   </PropertyGroup>
 
+  <!--
+    SSP integration note (second documented divergence from the vendored
+    reference copy in _reference/SSP.Activation, alongside DebugType above).
+
+    This project has zero PackageReferences - by design, see the Description
+    above - so NuGet's vulnerability audit has nothing to walk here. It still
+    contacts every configured feed at restore time to fetch the advisory
+    index, and on a machine where that index is unreachable it reports
+    NU1900 ("Error occurred while getting package vulnerability data"), which
+    TreatWarningsAsErrors above would escalate into a restore failure for a
+    network condition that has nothing to do with this library.
+
+    Disabling the audit for this project is therefore loss-free: there are no
+    packages to audit. Auditing still runs for every consuming project
+    (SSP.Server, SSP.ServiceBuilder, SSP.Tests, ...), which are the ones that
+    bring in external packages, and the solution-wide restore policy in
+    Directory.Build.props keeps the audit on and reports NU1901..NU1904 for
+    them.
+  -->
+  <PropertyGroup>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+
 </Project>

@@ -52,7 +52,8 @@
     and embed the resulting SSP.Client.exe (the apphost with the
     single-file bundle attached).
 
-    TEST FALLBACK: when SSP_SKIP_EMBED=1 is set (used by unit tests
+    TEST FALLBACK: when SSP_SKIP_EMBED is set to true (or 1/yes - see
+    SSP_SKIP_EMBED_EFFECTIVE in Directory.Build.props; used by unit tests
     to break the recursive build cycle and to avoid the slow cross-
     publish of win-x64 on every test run), we still need an embedded
     template so EmbeddedClientTemplateTests can run. In that case we
@@ -116,11 +117,11 @@
 
   <!--
     Choose the embedded template path:
-      - Production (SSP_SKIP_EMBED != 'true'): use the single-file
+      - Production (SSP_SKIP_EMBED_EFFECTIVE != 'true'): use the single-file
         SSP.Client.exe produced by PublishClientTemplate below, and the
         single-file SSP.ServiceHost.exe produced by
         PublishServiceHostTemplate below.
-      - Tests (SSP_SKIP_EMBED == 'true'): use the framework-dependent
+      - Tests (SSP_SKIP_EMBED_EFFECTIVE == 'true'): use the framework-dependent
         SSP.Client.dll from the regular build output. No service-host
         fallback is embedded: SSP.ServiceHost depends on SSP.Server, so
         its DLL cannot be guaranteed to exist when SSP.Server is
@@ -132,7 +133,7 @@
     is embedded as a manifest resource at SSP.Client build time.
   -->
   <Choose>
-    <When Condition="'$(SSP_SKIP_EMBED)' == 'true'">
+    <When Condition="'$(SSP_SKIP_EMBED_EFFECTIVE)' == 'true'">
       <ItemGroup>
         <EmbeddedResource Include="$(ClientDllPath)">
           <LogicalName>$(EmbeddedResourceName)</LogicalName>
@@ -173,7 +174,7 @@
   -->
   <Target Name="PublishClientTemplate"
           BeforeTargets="CoreCompile"
-          Condition="'$(DesignTimeBuild)' != 'true' AND '$(SSP_SKIP_EMBED)' != 'true'">
+          Condition="'$(DesignTimeBuild)' != 'true' AND '$(SSP_SKIP_EMBED_EFFECTIVE)' != 'true'">
 
     <Exec Command="dotnet publish &quot;$(ClientProjectDir)/SSP.Client.csproj&quot; -c $(Configuration) -f net8.0 -r win-x64 -o &quot;$(ClientPublishDir)&quot; /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true /p:IncludeAllContentForSelfExtract=true /p:EnableCompressionInSingleFile=false /p:DebugType=embedded /p:DesignTimeBuild=false /p:SSP_SKIP_EMBED=true"
           ConsoleToMSBuild="true" />
@@ -202,7 +203,7 @@
   -->
   <Target Name="PublishServiceHostTemplate"
           BeforeTargets="CoreCompile"
-          Condition="'$(DesignTimeBuild)' != 'true' AND '$(SSP_SKIP_EMBED)' != 'true'">
+          Condition="'$(DesignTimeBuild)' != 'true' AND '$(SSP_SKIP_EMBED_EFFECTIVE)' != 'true'">
 
     <Exec Command="dotnet publish &quot;$(ServiceHostProjectDir)/SSP.ServiceHost.csproj&quot; -c $(Configuration) -f net8.0 -r win-x64 -o &quot;$(ServiceHostPublishDir)&quot; /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true /p:IncludeAllContentForSelfExtract=true /p:EnableCompressionInSingleFile=false /p:DebugType=embedded /p:DesignTimeBuild=false /p:SSP_SKIP_EMBED=true"
           ConsoleToMSBuild="true" />
