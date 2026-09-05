@@ -260,7 +260,24 @@ public class LicenseKeyCertificationTests
         var payload = LicensePayloadFactory.For(authority).Build();
         using var tinyLeaf = RSA.Create(1024); // below the 2048-bit floor
         var certification = authority.Certify(payload, tinyLeaf);
-        var artifact = authority.IssueCertified(payload, certification, tinyLeaf);
+
+        // The authority-side issuer refuses to sign with a sub-floor leaf key
+        // (SignatureAlgorithms.Sign throws), so a weak-key artifact cannot be
+        // produced through IssueCertified. Craft it with raw RSA signatures to
+        // exercise the VALIDATOR's floor: the root certification signature is
+        // genuine and the payload signature verifies under the certified key,
+        // but the certified key itself is unusable (< 2048 bits).
+        var certificationCanonical = LicenseKeyCertificationCanonicalJson.Serialize(certification);
+        var certificationSignature = authority.SignCanonicalForTest(certificationCanonical);
+        var payloadCanonical = LicenseCanonicalJson.Serialize(payload);
+        var payloadSignature = tinyLeaf.SignData(
+            payloadCanonical, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
+        var artifact = LicenseArtifactCodec.EncodeCertified(
+            payload,
+            certification,
+            certificationSignature,
+            payloadSignature,
+            SignatureAlgorithms.RsaPssSha256);
 
         var result = ValidatorFactory.Create(authority).Validate(artifact);
 
