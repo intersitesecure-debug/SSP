@@ -1,6 +1,6 @@
 # SSP Security Corrections Roadmap
 
-**Status:** Active — roadmap established; no security correction has been implemented yet  
+**Status:** Active — Phase 1 implemented; automated validation blocked because the .NET SDK is unavailable in the current environment
 **Authority:** This document is the source of truth for SSP security hardening work.  
 **Execution order:** Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6  
 **Last updated:** 2026-09-05
@@ -32,7 +32,7 @@
 
 | Phase | Correction | Status | Code review | Automated tests | Threat model update |
 |---|---|---|---|---|---|
-| 1 | Enrollment Authentication Code Protection (M-1) | Not started | Not started | Not started | Not started |
+| 1 | Enrollment Authentication Code Protection (M-1) | In progress | Complete (self-review) | Blocked — `dotnet` unavailable | Complete |
 | 2 | Authentication Abuse Resistance (remaining M-1) | Not started | Not started | Not started | Not started |
 | 3 | Client Private Key Protection (M-2) | Not started | Not started | Not started | Not started |
 | 4 | License State Anti-Rollback Protection (M-3) | Not started | Not started | Not started | Not started |
@@ -51,7 +51,15 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 - **Tests performed:** Verified the document exists at the project root and reviewed its phase ordering and required tracking fields. No product or security tests were run because no code was changed.
 - **Remaining risks:** All security risks listed in Phases 1–6 remain open. Phase 1 must be completed before any later phase begins.
 
-<!-- Add Step 1, Step 2, ... below this line. -->
+### Step 1 — Phase 1 implementation
+
+- **Status:** Implementation complete; phase remains In progress because automated tests could not execute without the .NET SDK.
+- **What changed:** Added durable, server-side failed Authentication Code counters per hashed OTT. Failures one and two preserve the OTT; the third removes both pending and backward-compatible legacy authorization for that hash, permanently preventing every copy of the same client package from enrolling. Added credential-free `Enrollment.AuthenticationCodeFailed` and `Enrollment.OTTRevokedAfterFailedAttempts` events and all five required test scenarios. No client or wire-protocol state changed.
+- **Affected files:** `src/SSP.Core/Models/ServiceConfig.cs`; `src/SSP.Server/Runtime/ServerProtocol.cs`; `tests/SSP.Tests/F4_EnrollmentTests.cs`; `docs/THREAT_MODEL.md`; `Security Correction.md`.
+- **Tests performed:** `dotnet test tests/SSP.Tests/SSP.Tests.csproj --filter FullyQualifiedName~SSP.Tests.F4_EnrollmentTests --no-restore` — **blocked before execution**: `/bin/bash: dotnet: command not found`. `git diff --check` — **passed** with no whitespace errors. Static source check confirmed the new persisted fields, both required event names, and net8.0 test target are present. Automated test status remains Blocked, not Passed.
+- **Remaining risks:** The automated Phase 1 tests must be run in a .NET 8 SDK environment before this phase can be marked Complete. A local administrator capable of rolling back the protected service configuration may restore an earlier counter; roadmap Phase 4 addresses state anti-rollback. Three legitimate typing mistakes intentionally require offline reprovisioning with a new OTT/package. Phase 2 abuse-resistance review (entropy, delays, and rate limiting) remains Not started.
+
+<!-- Add Step 2, Step 3, ... below this line. -->
 
 ---
 
@@ -59,11 +67,11 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 
 **Goal:** Prevent brute-force attempts against the 10-digit Authentication Code used during client enrollment.
 
-**Phase status:** Not started  
-**Current step:** None  
-**Code review:** Not started  
-**Automated tests:** Not started  
-**Threat model update:** Not started
+**Phase status:** In progress — implementation complete; automated validation blocked
+**Current step:** Step 1 — awaiting execution in a .NET 8 SDK environment
+**Code review:** Complete (self-review)
+**Automated tests:** Blocked — `dotnet` is unavailable in the current environment
+**Threat model update:** Complete
 
 ### Required implementation
 
@@ -90,15 +98,15 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 
 ### Step completion record
 
-For each Phase 1 step, add a subsection here containing:
+#### Step 1 — Persisted failure limit and OTT revocation
 
-- **Status:**
-- **What changed:**
-- **Affected files:**
-- **Tests performed and results:**
-- **Code review:**
-- **Threat model update:**
-- **Remaining risks:**
+- **Status:** Implementation complete; Phase 1 remains In progress pending automated execution.
+- **What changed:** Persisted failed-code attempts per hashed OTT; revoked the OTT and pending enrollment on failure three; added the two required credential-free events and the five required behavioral scenarios.
+- **Affected files:** `src/SSP.Core/Models/ServiceConfig.cs`; `src/SSP.Server/Runtime/ServerProtocol.cs`; `tests/SSP.Tests/F4_EnrollmentTests.cs`; `docs/THREAT_MODEL.md`; `Security Correction.md`.
+- **Tests performed and results:** Filtered `F4_EnrollmentTests` command attempted but blocked because `dotnet` is not installed; `git diff --check` passed.
+- **Code review:** Self-review complete; verified lock ordering, hash-only identification, revocation of duplicate legacy/pending slots, secret-free events, and no client/protocol changes.
+- **Threat model update:** Complete — T31 and residual local rollback/operator lockout risks documented.
+- **Remaining risks:** Run automated tests under .NET 8; Phase 4 anti-rollback and Phase 2 abuse-resistance controls remain future work.
 
 ---
 

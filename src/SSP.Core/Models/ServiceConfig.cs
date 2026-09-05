@@ -53,6 +53,13 @@ public sealed class ServiceConfig
     public string? ActiveOneTimeTokenHash { get; set; }
 
     /// <summary>
+    /// Number of failed Authentication Code submissions for the legacy active
+    /// OTT. Persisted server-side so restarting the service cannot reset the
+    /// three-attempt enrollment limit.
+    /// </summary>
+    public int ActiveOneTimeTokenFailedAuthenticationCodeAttempts { get; set; }
+
+    /// <summary>
     /// Collection of pending One-Time Tokens for multi-client provisioning.
     /// Each entry stores the hash and the intended client name.
     /// Supports concurrent pending enrollments: Client02, Client03, etc.
@@ -84,6 +91,13 @@ public sealed class PendingOneTimeToken
 
     /// <summary>ISO-8601 creation timestamp.</summary>
     public string CreatedAtUtc { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Failed Authentication Code submissions for this OTT. This is server-side
+    /// state only; neither the counter nor the generated code enters a client
+    /// package.
+    /// </summary>
+    public int FailedAuthenticationCodeAttempts { get; set; }
 }
 
 /// <summary>

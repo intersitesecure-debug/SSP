@@ -50,6 +50,7 @@ namespace SSP.Server.Runtime;
 
 public sealed class ServerProtocol : IDisposable
 {
+    private const int MaximumAuthenticationCodeAttempts = 3;
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> EnrollmentLocks = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly ServiceConfig _config;
@@ -324,6 +325,25 @@ public sealed class ServerProtocol : IDisposable
 
         if (!TokenGenerator.ConstantTimeEquals(acm.Code, authCode))
         {
+            var revoked = await RecordFailedAuthenticationCodeAttemptAsync(
+                configPath,
+                presentedHash,
+                ct).ConfigureAwait(false);
+
+            ReportEnrollmentSecurityEvent(
+                "Enrollment.AuthenticationCodeFailed",
+                revoked ? MaximumAuthenticationCodeAttempts : null);
+
+            if (revoked)
+            {
+                ReportEnrollmentSecurityEvent(
+                    "Enrollment.OTTRevokedAfterFailedAttempts",
+                    MaximumAuthenticationCodeAttempts);
+                await SendOutcomeAsync(stream, false, "enrollment permanently failed", ct).ConfigureAwait(false);
+                throw new UnauthorizedAccessException(
+                    "AuthenticationCode mismatch; the One-Time Token has been permanently revoked.");
+            }
+
             await SendOutcomeAsync(stream, false, "verification failed", ct).ConfigureAwait(false);
             throw new UnauthorizedAccessException("AuthenticationCode mismatch.");
         }
@@ -369,11 +389,13 @@ public sealed class ServerProtocol : IDisposable
                     TokenGenerator.ConstantTimeEquals(config.ActiveOneTimeTokenHash!, matchedPending.OneTimeTokenHash))
                 {
                     config.ActiveOneTimeTokenHash = null;
+                    config.ActiveOneTimeTokenFailedAuthenticationCodeAttempts = 0;
                 }
             }
             if (matchedLegacy)
             {
                 config.ActiveOneTimeTokenHash = null;
+                config.ActiveOneTimeTokenFailedAuthenticationCodeAttempts = 0;
                 // Also remove any pending entry that might have same hash (first client created with both fields)
                 if (!string.IsNullOrEmpty(presentedHash))
                 {
@@ -411,6 +433,75 @@ public sealed class ServerProtocol : IDisposable
             Console.Error.WriteLine(
                 $"[authcode-file] Failed to write {AuthenticationCodeFile.ResolvePath()}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Durably records a failed code submission against the matched OTT. The
+    /// third failure removes every server-side authorization for that OTT, so
+    /// all copies of the same client package are permanently unable to retry.
+    /// The caller holds the per-service enrollment semaphore, while this method
+    /// takes the cross-process configuration lock used by all OTT mutations.
+    /// </summary>
+    private async Task<bool> RecordFailedAuthenticationCodeAttemptAsync(
+        string configPath,
+        string presentedHash,
+        CancellationToken ct)
+    {
+        using (await ServiceConfigFileLock.AcquireAsync(_serviceDir, ct).ConfigureAwait(false))
+        {
+            var current = await ServiceConfigStore.LoadAsync(configPath, ct).ConfigureAwait(false);
+            current.PendingOneTimeTokens ??= new List<PendingOneTimeToken>();
+
+            var pending = current.PendingOneTimeTokens.FirstOrDefault(p =>
+                TokenGenerator.ConstantTimeEquals(p.OneTimeTokenHash, presentedHash));
+
+            int attempts;
+            if (pending is not null)
+            {
+                pending.FailedAuthenticationCodeAttempts++;
+                attempts = pending.FailedAuthenticationCodeAttempts;
+            }
+            else if (!string.IsNullOrEmpty(current.ActiveOneTimeTokenHash) &&
+                     TokenGenerator.ConstantTimeEquals(current.ActiveOneTimeTokenHash, presentedHash))
+            {
+                current.ActiveOneTimeTokenFailedAuthenticationCodeAttempts++;
+                attempts = current.ActiveOneTimeTokenFailedAuthenticationCodeAttempts;
+            }
+            else
+            {
+                // Another process has already consumed or revoked the OTT.
+                // Treat it as permanently failed rather than recreating state.
+                return true;
+            }
+
+            var revoked = attempts >= MaximumAuthenticationCodeAttempts;
+            if (revoked)
+            {
+                current.PendingOneTimeTokens.RemoveAll(p =>
+                    TokenGenerator.ConstantTimeEquals(p.OneTimeTokenHash, presentedHash));
+
+                if (!string.IsNullOrEmpty(current.ActiveOneTimeTokenHash) &&
+                    TokenGenerator.ConstantTimeEquals(current.ActiveOneTimeTokenHash, presentedHash))
+                {
+                    current.ActiveOneTimeTokenHash = null;
+                    current.ActiveOneTimeTokenFailedAuthenticationCodeAttempts = 0;
+                }
+            }
+
+            await PersistConfigAsync(configPath, current, ct).ConfigureAwait(false);
+            return revoked;
+        }
+    }
+
+    private static void ReportEnrollmentSecurityEvent(string eventName, int? failedAttempts)
+    {
+        // Deliberately excludes the OTT, Authentication Code, public key, and
+        // fingerprint. The stable event name is suitable for local collection
+        // without placing enrollment credentials in logs.
+        Console.Error.WriteLine(
+            failedAttempts is int count
+                ? $"[security] event={eventName} failedAttempts={count}"
+                : $"[security] event={eventName}");
     }
 
     // ────────────────────────────────────────────────────────────────
