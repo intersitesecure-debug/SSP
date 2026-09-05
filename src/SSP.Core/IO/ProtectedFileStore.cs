@@ -43,6 +43,22 @@
 using System.Security.Cryptography;
 using System.Text;
 
+// CA1416 suppression (build-clean, platform-safe)
+// ------------------------------------------------
+// System.Security.Cryptography.DataProtectionScope is annotated
+// [SupportedOSPlatform("windows")], so ANY reference to the type - even a
+// pure enum member used as a scope MARKER in cross-platform code - is
+// reported by the platform-compatibility analyzer as CA1416. The actual
+// Windows-only APIs (ProtectedData.Protect / Unprotect) are never invoked
+// off Windows: every call site is guarded by OperatingSystem.IsWindows()
+// (see ProtectedFileStore.Protect / UnprotectWithWindowsDpapi, which throws
+// PlatformNotSupportedException otherwise) and non-Windows hosts take the
+// AES-GCM fallback. The enum reference itself carries no runtime dependency,
+// so the diagnostic is a false positive here and is suppressed deliberately
+// and locally rather than globally in the project file.
+#pragma warning disable CA1416
+
+
 namespace SSP.Core.IO;
 
 /// <summary>
@@ -360,7 +376,10 @@ public static class ProtectedFileStore
 
         var key = GetOrCreateNonWindowsKey();
         var nonce = payload[..AesNonceSizeBytes];
-        var tag = payload.Slice(AesNonceSizeBytes, AesNonceSizeBytes + AesTagSizeBytes);
+        // The tag occupies AesTagSizeBytes bytes starting right after the
+        // nonce (payload layout: nonce | tag | ciphertext). The length
+        // argument of Span.Slice is a LENGTH, not an end offset.
+        var tag = payload.Slice(AesNonceSizeBytes, AesTagSizeBytes);
         var ciphertext = payload[(AesNonceSizeBytes + AesTagSizeBytes)..];
         var plaintext = new byte[ciphertext.Length];
 
@@ -447,3 +466,4 @@ public static class ProtectedFileStore
         catch { /* best effort */ }
     }
 }
+#pragma warning restore CA1416
