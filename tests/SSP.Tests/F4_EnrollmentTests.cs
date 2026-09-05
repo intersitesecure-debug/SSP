@@ -307,28 +307,15 @@ public class F4_EnrollmentTests
         Assert.NotEqual("1234567890", code);
     }
 
+    // Cooldown control lives in Helpers/EnrollmentCooldown so every
+    // enrollment test manipulates the Phase 2 retry stamp the same way.
     private static Task ClearAuthenticationCodeCooldownAsync(SspTestHarness harness) =>
-        ForceAuthenticationCodeCooldownAsync(harness, retryNotBeforeUtc: null);
+        EnrollmentCooldown.ClearAsync(harness);
 
     private static Task ForceAuthenticationCodeCooldownAsync(
         SspTestHarness harness,
         DateTimeOffset retryNotBefore) =>
-        ForceAuthenticationCodeCooldownAsync(harness, retryNotBefore.ToString("o"));
-
-    private static async Task ForceAuthenticationCodeCooldownAsync(
-        SspTestHarness harness,
-        string? retryNotBeforeUtc)
-    {
-        var path = Path.Combine(harness.ServiceDir, ".cache.dat");
-        using (await ServiceConfigFileLock.AcquireAsync(harness.ServiceDir))
-        {
-            var config = await ServiceConfigStore.LoadAsync(path);
-            config.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc = retryNotBeforeUtc;
-            foreach (var pending in config.PendingOneTimeTokens)
-                pending.AuthenticationCodeRetryNotBeforeUtc = retryNotBeforeUtc;
-            await ServiceConfigStore.SaveAsync(path, config);
-        }
-    }
+        EnrollmentCooldown.ForceAsync(harness, retryNotBefore);
 
     private static async Task AttemptEnrollmentWithWrongCodeAsync(
         SspTestHarness harness,
