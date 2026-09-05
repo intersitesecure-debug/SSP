@@ -59,6 +59,33 @@ internal static class EnrollmentCooldown
                 pending.AuthenticationCodeRetryNotBeforeUtc = retryNotBeforeUtc;
 
             await ServiceConfigStore.SaveAsync(path, config, ct).ConfigureAwait(false);
+
+            // Phase 4 (M-3): the same simulated clock change must be applied
+            // to the enrollment witness, whose cooldown instant is a durable
+            // lower bound the (test-forced) config value cannot shrink.
+            // Without this, "cooldown has elapsed" simulations would still be
+            // rate-limited by the witness. Failure counts are left untouched,
+            // exactly as in the config half: the three-attempt lockout must
+            // keep behaving as in production.
+            try
+            {
+                var witness = await SSP.Server.Runtime.EnrollmentStateWitnessStore
+                    .LoadAsync(harness.ServiceDir, ct).ConfigureAwait(false);
+                if (witness is not null)
+                {
+                    foreach (var entry in witness.Entries.Values)
+                        entry.RetryNotBeforeUtc = retryNotBeforeUtc;
+
+                    await SSP.Server.Runtime.EnrollmentStateWitnessStore
+                        .SaveAsync(harness.ServiceDir, witness, ct).ConfigureAwait(false);
+                }
+            }
+            catch (InvalidDataException)
+            {
+                // A corrupt witness is a fail-closed condition for the server,
+                // not for this helper; the tests that need one construct it
+                // themselves.
+            }
         }
     }
 }

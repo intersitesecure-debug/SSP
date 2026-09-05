@@ -19,7 +19,24 @@ public enum LicenseSecurityEventType
     ActivationRequired = 12,
 
     /// <summary>An activation code was accepted and the license transitioned to Valid.</summary>
-    LicenseActivated = 13
+    LicenseActivated = 13,
+
+    /// <summary>
+    /// The persisted license state is older than the redundantly witnessed
+    /// state (Phase 4 / M-3): a rollback of the state file was detected and
+    /// the store failed closed. The detail names the epochs involved; no
+    /// credentials are ever included.
+    /// </summary>
+    LicenseStateRollbackDetected = 14,
+
+    /// <summary>
+    /// The license state file is missing while a witness exists (Phase 4 /
+    /// M-3): a deletion attempt was detected. The anti-rollback floor was
+    /// recovered from the witness — the deletion did NOT reset the floor —
+    /// and the event is the operator-visible signal that the machine's
+    /// licensing state was tampered with.
+    /// </summary>
+    LicenseStateDeletionRecovered = 15
 }
 
 /// <summary>

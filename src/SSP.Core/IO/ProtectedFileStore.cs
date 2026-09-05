@@ -6,6 +6,8 @@
 //   - .runtime.dat
 //   - .index.dat
 //   - .license-state.dat   (activation anti-rollback state; see SspLicenseStateStore)
+//   - .witness.dat         (redundant anti-rollback witness copies; see
+//                            SspStateWitnessPaths — Phase 4 / M-3)
 //
 // Production Windows builds use DPAPI (ProtectedData). The protection SCOPE
 // is a per-caller decision recorded inside the envelope:
@@ -100,6 +102,7 @@ public static class ProtectedFileStore
         ".runtime.dat",
         ".index.dat",
         ".license-state.dat",
+        ".witness.dat",
     };
 
     private static readonly object NonWindowsKeyLock = new();

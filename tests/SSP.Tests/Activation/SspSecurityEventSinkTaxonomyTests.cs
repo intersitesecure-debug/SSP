@@ -45,6 +45,8 @@ public class SspSecurityEventSinkTaxonomyTests
                 LicenseSecurityEventType.ProtectedOperationDenied => EventLogEntryType.Warning,
                 LicenseSecurityEventType.ActivationRequired => EventLogEntryType.Information,
                 LicenseSecurityEventType.LicenseActivated => EventLogEntryType.Information,
+                LicenseSecurityEventType.LicenseStateRollbackDetected => EventLogEntryType.Warning,
+                LicenseSecurityEventType.LicenseStateDeletionRecovered => EventLogEntryType.Warning,
                 _ => throw new Xunit.Sdk.XunitException($"No reviewed severity for {eventType}"),
             };
 
@@ -71,6 +73,12 @@ public class SspSecurityEventSinkTaxonomyTests
         Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseRevoked));
         Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseLockdownActivated));
         Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.ProtectedOperationDenied));
+
+        // Warning: the Phase 4 (M-3) state-integrity detections - a rolled-back
+        // state file and a deleted state file are operator-actionable tamper
+        // signals, not normal lifecycle transitions.
+        Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseStateRollbackDetected));
+        Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseStateDeletionRecovered));
 
         // Error is deliberately never used: the sink is best-effort and
         // licensing denial states are operational, not crashes.
@@ -110,7 +118,7 @@ public class SspSecurityEventSinkTaxonomyTests
         // type this assertion fails (and so does the exhaustive switch in the
         // sink), which is exactly the signal that the taxonomy needs review.
         var expected = Enum.GetValues<LicenseSecurityEventType>();
-        Assert.Equal(13, expected.Length);
+        Assert.Equal(15, expected.Length);
 
         Assert.Contains(LicenseSecurityEventType.LicenseLoaded, expected);
         Assert.Contains(LicenseSecurityEventType.LicenseValidated, expected);
@@ -125,5 +133,7 @@ public class SspSecurityEventSinkTaxonomyTests
         Assert.Contains(LicenseSecurityEventType.ProtectedOperationDenied, expected);
         Assert.Contains(LicenseSecurityEventType.ActivationRequired, expected);
         Assert.Contains(LicenseSecurityEventType.LicenseActivated, expected);
+        Assert.Contains(LicenseSecurityEventType.LicenseStateRollbackDetected, expected);
+        Assert.Contains(LicenseSecurityEventType.LicenseStateDeletionRecovered, expected);
     }
 }

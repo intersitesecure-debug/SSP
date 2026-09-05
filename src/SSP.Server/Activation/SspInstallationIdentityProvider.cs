@@ -49,13 +49,38 @@ public sealed class SspInstallationIdentityProvider : SSP.Activation.IInstallati
     {
         lock (_gate)
         {
-            if (!_initialized)
-            {
-                _cached = ReadMachineGuid();
-                _initialized = true;
-            }
-
+            InitializeMachineGuid();
             return _cached is null ? null : ComputeInstallationId(_cached);
+        }
+    }
+
+    /// <summary>
+    /// Installation identity for the PERSISTED LICENSE STATE binding (roadmap
+    /// Phase 4 / M-3): SHA-256 over the same Windows MachineGuid, but mixed
+    /// with the dedicated <see cref="SspLicensing.LicenseStateBindingPurposeTag"/>
+    /// domain-separation tag so the state-binding id is a different value than
+    /// the license-binding id (which is carried in the readable license
+    /// artifact). The raw MachineGuid never appears in a state file, a license
+    /// artifact or a security event. Null on hosts where the machine identity
+    /// is unavailable (non-Windows test/development hosts), matching the
+    /// license-binding semantics: unavailable identity means the state store
+    /// runs unbound, it never means an error.
+    /// </summary>
+    public string? GetLicenseStateBindingId()
+    {
+        lock (_gate)
+        {
+            InitializeMachineGuid();
+            return _cached is null ? null : ComputeLicenseStateBindingId(_cached);
+        }
+    }
+
+    private void InitializeMachineGuid()
+    {
+        if (!_initialized)
+        {
+            _cached = ReadMachineGuid();
+            _initialized = true;
         }
     }
 
@@ -71,7 +96,27 @@ public sealed class SspInstallationIdentityProvider : SSP.Activation.IInstallati
             throw new ArgumentException("MachineGuid must not be null or empty.", nameof(machineGuid));
         }
 
-        var material = Encoding.UTF8.GetBytes(machineGuid + SspLicensing.InstallationBindingPurposeTag);
+        return ComputeDomainSeparatedId(machineGuid, SspLicensing.InstallationBindingPurposeTag);
+    }
+
+    /// <summary>
+    /// Computes the license-STATE binding identifier from the raw Windows
+    /// MachineGuid using the dedicated Phase 4 domain separation tag. Exposed
+    /// internally for deterministic tests without requiring a live registry.
+    /// </summary>
+    internal static string ComputeLicenseStateBindingId(string machineGuid)
+    {
+        if (string.IsNullOrWhiteSpace(machineGuid))
+        {
+            throw new ArgumentException("MachineGuid must not be null or empty.", nameof(machineGuid));
+        }
+
+        return ComputeDomainSeparatedId(machineGuid, SspLicensing.LicenseStateBindingPurposeTag);
+    }
+
+    private static string ComputeDomainSeparatedId(string machineGuid, string purposeTag)
+    {
+        var material = Encoding.UTF8.GetBytes(machineGuid + purposeTag);
         var hash = SHA256.HashData(material);
         CryptographicOperations.ZeroMemory(material);
         return Convert.ToHexString(hash).ToLowerInvariant();

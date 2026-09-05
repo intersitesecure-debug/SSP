@@ -39,6 +39,17 @@ public static class SspLicensing
     public const string InstallationBindingPurposeTag = "SSP-LICENSE-INSTALL-v1";
 
     /// <summary>
+    /// Domain-separation tag for the PERSISTED LICENSE STATE binding (roadmap
+    /// Phase 4 / M-3). The license-state installation id is deliberately a
+    /// DIFFERENT hash of the same machine identity than the license-binding id
+    /// (<see cref="InstallationBindingPurposeTag"/>): the license-binding id is
+    /// carried in the readable license artifact, while the state-binding id
+    /// never leaves the encrypted-at-rest state files, and the two purposes
+    /// must never be confused for one another.
+    /// </summary>
+    public const string LicenseStateBindingPurposeTag = "SSP-LICENSE-STATE-BIND-v1";
+
+    /// <summary>
     /// SSP host feature vocabulary, and the SINGLE mapping mechanism between an
     /// SSP protected application (<c>ServiceConfig.ApplicationName</c>) and the
     /// feature identity carried in a signed license payload.
