@@ -91,6 +91,16 @@ public class AuthenticationCodeFileTests
 
             output.GetStringBuilder().Clear();
 
+            // The wrong code above armed the Phase 2 progressive cooldown
+            // (AuthenticationCodeAbusePolicy: 2s after the first failure).
+            // Until it elapses the server refuses to mint a new code and
+            // answers EnrollmentResult{Success=false,"verification failed"},
+            // which the client raises as InvalidOperationException. That is
+            // correct production behaviour, so clear the retry stamp instead
+            // of sleeping: this test is about the Authcode.txt readout, not
+            // about the rate limiter (covered by F4_EnrollmentTests).
+            await EnrollmentCooldown.ClearAsync(harness);
+
             // Second enrollment request must overwrite the file with a
             // freshly generated code, then succeed when that code is sent.
             var secondCode = await RunEnrollmentAsync(harness, ott, output, submit: null, expectSuccess: true);
