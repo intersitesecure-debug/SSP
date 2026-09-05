@@ -8,14 +8,28 @@ namespace SSP.Activation;
 /// <summary>
 /// Codec for the license artifact envelope (the "license file" format).
 ///
-/// Envelope (strict JSON object):
+/// Legacy envelope (artifact version 1) — the root authority signs the payload directly:
 /// <code>
 /// {
 ///   "format": "ssp-license",
 ///   "artifactVersion": 1,
 ///   "signatureAlgorithm": "RSA-PSS-SHA256",
 ///   "payload": "&lt;base64url of the canonical payload JSON&gt;",
-///   "signature": "&lt;base64url of the signature over the canonical payload bytes&gt;"
+///   "signature": "&lt;base64url of the root signature over the canonical payload bytes&gt;"
+/// }
+/// </code>
+///
+/// Certified envelope (artifact version 2) — the root authority certifies a per-license
+/// public key, and that leaf key signs the payload:
+/// <code>
+/// {
+///   "format": "ssp-license",
+///   "artifactVersion": 2,
+///   "signatureAlgorithm": "RSA-PSS-SHA256",
+///   "keyCertification": "&lt;base64url of the canonical certification JSON&gt;",
+///   "keyCertificationSignature": "&lt;base64url of the root signature over the certification&gt;",
+///   "payload": "&lt;base64url of the canonical payload JSON&gt;",
+///   "signature": "&lt;base64url of the leaf signature over the canonical payload bytes&gt;"
 /// }
 /// </code>
 ///
@@ -25,14 +39,21 @@ namespace SSP.Activation;
 /// The signature algorithm field is checked for well-formedness here, but checked for
 /// SUPPORT at validation time, so a future library understanding more algorithms can
 /// still parse artifacts without redesign.
+///
+/// Version 1 remains accepted (legacy licenses are still cryptographically valid: the root
+/// authority is the highest trust and signing the payload directly is at least as strong as
+/// signing a leaf key). Version 2 adds per-license key isolation and activation.
 /// </summary>
 public static class LicenseArtifactCodec
 {
     /// <summary>Format discriminator embedded in every artifact.</summary>
     public const string ArtifactFormat = "ssp-license";
 
-    /// <summary>Artifact envelope version produced by this library.</summary>
-    public const int CurrentArtifactVersion = 1;
+    /// <summary>Legacy envelope version: the root authority signs the license payload directly.</summary>
+    public const int LegacyArtifactVersion = 1;
+
+    /// <summary>Current envelope version: the root authority certifies a per-license key that signs the payload.</summary>
+    public const int CurrentArtifactVersion = 2;
 
     /// <summary>
     /// Maximum accepted artifact size in characters. Guards against resource exhaustion
@@ -46,19 +67,27 @@ public static class LicenseArtifactCodec
         "format", "artifactVersion", "signatureAlgorithm", "payload", "signature"
     };
 
+    private static readonly string[] CertifiedEnvelopeFields =
+    {
+        "format", "artifactVersion", "signatureAlgorithm",
+        "keyCertification", "keyCertificationSignature",
+        "payload", "signature"
+    };
+
     private static readonly string[] PayloadFields =
     {
         "licenseId", "productId", "productName", "customerId", "customerName", "edition",
         "licenseVersion", "issuedAt", "notBefore", "expiresAt", "installationId",
+        "organizationName", "computerName",
         "featureSet", "limits", "status", "sequenceNumber"
-    }
-
-    ;
+    };
 
     /// <summary>
-    /// Encodes a payload and an already computed signature into the artifact envelope JSON.
-    /// The payload is re-canonicalized here, guaranteeing that the embedded payload bytes
-    /// are exactly the canonical bytes the signature was computed over.
+    /// Encodes a payload and an already computed signature into the LEGACY (version 1)
+    /// artifact envelope JSON. The payload is re-canonicalized here, guaranteeing that the
+    /// embedded payload bytes are exactly the canonical bytes the signature was computed
+    /// over. Produces only the legacy root-signed format; version-2 artifacts are produced
+    /// by <see cref="EncodeCertified"/>.
     /// </summary>
     public static string Encode(LicensePayload payload, string signatureAlgorithm, int artifactVersion, byte[] signature)
     {
@@ -75,6 +104,13 @@ public static class LicenseArtifactCodec
         if (signature.Length == 0)
         {
             throw new ArgumentException("Signature must not be empty.", nameof(signature));
+        }
+
+        if (artifactVersion != LegacyArtifactVersion)
+        {
+            throw new ArgumentException(
+                $"Encode produces only the legacy artifact version {LegacyArtifactVersion}; use EncodeCertified for version {CurrentArtifactVersion}.",
+                nameof(artifactVersion));
         }
 
         if (!SignatureAlgorithms.IsSupported(signatureAlgorithm))
@@ -99,8 +135,76 @@ public static class LicenseArtifactCodec
     }
 
     /// <summary>
-    /// Strictly decodes an artifact. Returns false with a structured error for every
-    /// malformed input; this method never throws for invalid artifacts.
+    /// Encodes a CERTIFIED (version 2) artifact: the payload signed by the per-license
+    /// leaf key, plus the key certification and the root authority's signature over it.
+    /// The payload and the certification are both re-canonicalized here, so the embedded
+    /// bytes are exactly the canonical bytes the signatures were computed over.
+    /// </summary>
+    public static string EncodeCertified(
+        LicensePayload payload,
+        LicenseKeyCertification certification,
+        byte[] certificationSignature,
+        byte[] signature,
+        string signatureAlgorithm)
+    {
+        if (payload is null)
+        {
+            throw new ArgumentNullException(nameof(payload));
+        }
+
+        if (certification is null)
+        {
+            throw new ArgumentNullException(nameof(certification));
+        }
+
+        if (certificationSignature is null)
+        {
+            throw new ArgumentNullException(nameof(certificationSignature));
+        }
+
+        if (certificationSignature.Length == 0)
+        {
+            throw new ArgumentException("Certification signature must not be empty.", nameof(certificationSignature));
+        }
+
+        if (signature is null)
+        {
+            throw new ArgumentNullException(nameof(signature));
+        }
+
+        if (signature.Length == 0)
+        {
+            throw new ArgumentException("Signature must not be empty.", nameof(signature));
+        }
+
+        if (!SignatureAlgorithms.IsSupported(signatureAlgorithm))
+        {
+            throw new ArgumentException($"Unsupported signature algorithm '{signatureAlgorithm}'.", nameof(signatureAlgorithm));
+        }
+
+        var canonicalPayload = LicenseCanonicalJson.Serialize(payload);
+        var canonicalCertification = LicenseKeyCertificationCanonicalJson.Serialize(certification);
+
+        var buffer = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = true });
+        writer.WriteStartObject();
+        writer.WriteString("format", ArtifactFormat);
+        writer.WriteNumber("artifactVersion", CurrentArtifactVersion);
+        writer.WriteString("signatureAlgorithm", signatureAlgorithm);
+        writer.WriteString("keyCertification", Base64Url.Encode(canonicalCertification));
+        writer.WriteString("keyCertificationSignature", Base64Url.Encode(certificationSignature));
+        writer.WriteString("payload", Base64Url.Encode(canonicalPayload));
+        writer.WriteString("signature", Base64Url.Encode(signature));
+        writer.WriteEndObject();
+        writer.Flush();
+
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
+    }
+
+    /// <summary>
+    /// Strictly decodes an artifact (version 1 or version 2). Returns false with a
+    /// structured error for every malformed input; this method never throws for invalid
+    /// artifacts.
     /// </summary>
     public static bool TryDecode(string? artifactJson, out LicenseArtifact? artifact, out ArtifactDecodeError? error)
     {
@@ -153,15 +257,6 @@ public static class LicenseArtifactCodec
                 return false;
             }
 
-            foreach (var property in root.EnumerateObject())
-            {
-                if (!EnvelopeFields.Contains(property.Name))
-                {
-                    error = new ArtifactDecodeError(ArtifactDecodeErrorCode.UnknownField, $"Unknown artifact field '{property.Name}'.");
-                    return false;
-                }
-            }
-
             if (!TryGetStringField(root, "format", out var format, out error))
             {
                 return false;
@@ -185,11 +280,26 @@ public static class LicenseArtifactCodec
                 return false;
             }
 
-            if (artifactVersion != CurrentArtifactVersion)
+            if (artifactVersion != LegacyArtifactVersion && artifactVersion != CurrentArtifactVersion)
             {
                 error = new ArtifactDecodeError(ArtifactDecodeErrorCode.UnknownArtifactVersion,
-                    $"Unsupported artifact version {artifactVersion} (supported: {CurrentArtifactVersion}).");
+                    $"Unsupported artifact version {artifactVersion} (supported: {LegacyArtifactVersion}, {CurrentArtifactVersion}).");
                 return false;
+            }
+
+            // The envelope field set is version-specific: the certification fields exist
+            // only in version 2, and a version 1 artifact carrying them (or a version 2
+            // artifact omitting them) is rejected below.
+            var isCertified = artifactVersion == CurrentArtifactVersion;
+            var expectedFields = isCertified ? CertifiedEnvelopeFields : EnvelopeFields;
+
+            foreach (var property in root.EnumerateObject())
+            {
+                if (!expectedFields.Contains(property.Name))
+                {
+                    error = new ArtifactDecodeError(ArtifactDecodeErrorCode.UnknownField, $"Unknown artifact field '{property.Name}'.");
+                    return false;
+                }
             }
 
             if (!TryGetStringField(root, "signatureAlgorithm", out var signatureAlgorithm, out error))
@@ -223,6 +333,45 @@ public static class LicenseArtifactCodec
             {
                 error = new ArtifactDecodeError(ArtifactDecodeErrorCode.InvalidEncoding, "Field 'signature' is not valid base64url.");
                 return false;
+            }
+
+            LicenseKeyCertification? certification = null;
+            byte[]? certificationSignature = null;
+
+            if (isCertified)
+            {
+                if (!TryGetStringField(root, "keyCertification", out var certificationText, out error))
+                {
+                    return false;
+                }
+
+                if (!TryGetStringField(root, "keyCertificationSignature", out var certificationSignatureText, out error))
+                {
+                    return false;
+                }
+
+                if (!Base64Url.TryDecode(certificationText, out var certificationBytes))
+                {
+                    error = new ArtifactDecodeError(ArtifactDecodeErrorCode.InvalidEncoding, "Field 'keyCertification' is not valid base64url.");
+                    return false;
+                }
+
+                if (!Base64Url.TryDecode(certificationSignatureText, out var certificationSignatureBytes))
+                {
+                    error = new ArtifactDecodeError(ArtifactDecodeErrorCode.InvalidEncoding, "Field 'keyCertificationSignature' is not valid base64url.");
+                    return false;
+                }
+
+                var certificationJson = Encoding.UTF8.GetString(certificationBytes);
+                if (!LicenseKeyCertificationCodec.TryDecode(certificationJson, out certification, out var certificationError))
+                {
+                    error = new ArtifactDecodeError(
+                        certificationError!.Code == ArtifactDecodeErrorCode.InvalidJson ? ArtifactDecodeErrorCode.InvalidPayloadJson : certificationError.Code,
+                        $"Key certification could not be decoded ({certificationError.Code}): {certificationError.Detail}");
+                    return false;
+                }
+
+                certificationSignature = certificationSignatureBytes;
             }
 
             JsonDocument payloadDocument;
@@ -268,7 +417,9 @@ public static class LicenseArtifactCodec
                     Payload = payload,
                     SignatureAlgorithm = signatureAlgorithm,
                     ArtifactVersion = artifactVersion,
-                    Signature = signatureBytes
+                    Signature = signatureBytes,
+                    Certification = certification,
+                    CertificationSignature = certificationSignature
                 };
 
                 return true;
@@ -359,6 +510,18 @@ public static class LicenseArtifactCodec
                 error = $"Payload field 'installationId' exceeds {LicenseStringLimits.InstallationId} characters.";
                 return false;
             }
+        }
+
+        string? organizationName = TryParseOptionalString(root, "organizationName", LicenseStringLimits.OrganizationOrPersonName, ref error);
+        if (error is not null)
+        {
+            return false;
+        }
+
+        string? computerName = TryParseOptionalString(root, "computerName", LicenseStringLimits.ComputerName, ref error);
+        if (error is not null)
+        {
+            return false;
         }
 
         if (!root.TryGetProperty("featureSet", out var featureElement))
@@ -496,6 +659,8 @@ public static class LicenseArtifactCodec
                 ProductName = productName,
                 CustomerId = customerId,
                 CustomerName = customerName,
+                OrganizationOrPersonName = organizationName,
+                ComputerName = computerName,
                 Edition = edition,
                 LicenseVersion = licenseVersion,
                 IssuedAt = issuedAt,
@@ -515,6 +680,35 @@ public static class LicenseArtifactCodec
             error = ex.Message;
             return false;
         }
+    }
+
+    private static string? TryParseOptionalString(JsonElement root, string field, int maxLength, ref string? error)
+    {
+        if (!root.TryGetProperty(field, out var element))
+        {
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            error = $"Payload field '{field}' must be a string when present.";
+            return null;
+        }
+
+        var text = element.GetString();
+        if (string.IsNullOrEmpty(text))
+        {
+            error = $"Payload field '{field}' must not be empty when present (omit it to leave it unset).";
+            return null;
+        }
+
+        if (text.Length > maxLength)
+        {
+            error = $"Payload field '{field}' exceeds {maxLength} characters.";
+            return null;
+        }
+
+        return text;
     }
 
     private static bool TryParseRequiredGuid(JsonElement root, string field, out Guid value, [System.Diagnostics.CodeAnalysis.NotNullWhen(false)] ref string? error)
@@ -610,6 +804,8 @@ internal static class LicenseStringLimits
 {
     public const int ProductName = 200;
     public const int CustomerName = 200;
+    public const int OrganizationOrPersonName = 200;
+    public const int ComputerName = 64;
     public const int Edition = 64;
     public const int LicenseVersion = 32;
     public const int InstallationId = 128;

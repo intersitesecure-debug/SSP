@@ -88,7 +88,12 @@ public static class Program
             string.Equals(args[0], "--install-license", StringComparison.Ordinal);
         var isTrustAnchorInfo = args.Length >= 1 &&
             string.Equals(args[0], "--trust-anchor-info", StringComparison.Ordinal);
+        var isActivate = args.Length >= 1 &&
+            string.Equals(args[0], "--activate", StringComparison.Ordinal);
+        var isCreateActivationRequest = args.Length >= 1 &&
+            string.Equals(args[0], "--create-activation-request", StringComparison.Ordinal);
         if (!isRunOnce && !isLicenseStatus && !isLicenseInstall && !isTrustAnchorInfo &&
+            !isActivate && !isCreateActivationRequest &&
             ServerInstallationBootstrapper.InstallAndLaunchSetupIfNeeded())
             return 0;
 
@@ -161,6 +166,42 @@ public static class Program
             ctx.ExitCode = await RunInstallLicenseAsync(file, licenseRoot) ? 0 : 1;
         });
         root.Add(installLicenseCmd);
+
+        // OFFLINE ACTIVATION (licensing, not client enrollment). Writes the
+        // activation-request file carrying the license identity and the OTT for
+        // out-of-band delivery to the SSP Licensing Authority. Transport only.
+        var createActivationRequestRootOpt = new Option<string?>(
+            "--license-root",
+            "Optional licensing directory override (defaults to SSP_LICENSE_ROOT, then the canonical product root).");
+        var createActivationRequestCmd = new Command(
+            "--create-activation-request",
+            "Write the license activation request file for offline delivery to the Licensing Authority");
+        createActivationRequestCmd.AddOption(createActivationRequestRootOpt);
+        createActivationRequestCmd.SetHandler(async ctx =>
+        {
+            var licenseRoot = ctx.ParseResult.GetValueForOption(createActivationRequestRootOpt);
+            ctx.ExitCode = await RunCreateActivationRequestAsync(licenseRoot) ? 0 : 1;
+        });
+        root.Add(createActivationRequestCmd);
+
+        // OFFLINE ACTIVATION (licensing). The operator types the 10-digit code the
+        // Licensing Authority returned; the server hashes and verifies it against the
+        // signed certification, persists the activation and transitions to Valid. The
+        // server never generates the code.
+        var activateCodeArg = new Argument<string>("code", "The 10-digit activation code issued by the SSP Licensing Authority.");
+        var activateRootOpt = new Option<string?>(
+            "--license-root",
+            "Optional licensing directory override (defaults to SSP_LICENSE_ROOT, then the canonical product root).");
+        var activateCmd = new Command("--activate", "Activate the installed license with its 10-digit activation code");
+        activateCmd.AddArgument(activateCodeArg);
+        activateCmd.AddOption(activateRootOpt);
+        activateCmd.SetHandler(async ctx =>
+        {
+            var code = ctx.ParseResult.GetValueForArgument(activateCodeArg);
+            var licenseRoot = ctx.ParseResult.GetValueForOption(activateRootOpt);
+            ctx.ExitCode = await RunActivateAsync(code, licenseRoot) ? 0 : 1;
+        });
+        root.Add(activateCmd);
 
         // RELEASE VERIFICATION. Reports the Licensing Authority trust anchor
         // this binary was built with - provisioned or not, key size, SPKI
@@ -460,21 +501,144 @@ public static class Program
 
             using var activation = SspActivationService.Create(paths);
             var result = await SspLicenseInstaller.InstallAsync(activation, sourcePath);
-            if (!result.IsValid)
+            if (result.IsValid)
             {
-                // Keep the status vocabulary and secret-free diagnostics used by
-                // --license-status; importantly, the target was not replaced.
-                Console.Error.WriteLine($"[activation] license rejected: {result.State} ({result.ReasonCode}): {result.Detail}");
-                return false;
+                Console.WriteLine($"License installed: {paths.LicenseFilePath}");
+                Console.WriteLine($"State: {result.State} ({result.ReasonCode})");
+                return true;
             }
 
-            Console.WriteLine($"License installed: {paths.LicenseFilePath}");
-            Console.WriteLine($"State: {result.State} ({result.ReasonCode})");
-            return true;
+            if (result.State == LicenseState.ActivationRequired)
+            {
+                Console.WriteLine($"License installed: {paths.LicenseFilePath}");
+                Console.WriteLine($"State: {result.State} ({result.ReasonCode})");
+                Console.WriteLine(
+                    "This license requires activation. Run 'SSP.Server --create-activation-request', " +
+                    "send the request to the SSP Licensing Authority, then run 'SSP.Server --activate <code>'.");
+                return true;
+            }
+
+            // Keep the status vocabulary and secret-free diagnostics used by
+            // --license-status; importantly, the target was not replaced.
+            Console.Error.WriteLine($"[activation] license rejected: {result.State} ({result.ReasonCode}): {result.Detail}");
+            return false;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[activation] license installation failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Writes the activation-request file for a license awaiting activation. Composes the
+    /// runtime, loads the artifact, builds the transport-independent request message and
+    /// writes it atomically to <see cref="SspLicensePaths.ActivationRequestFilePath"/>.
+    /// No protected service is started and no periodic refresh is started.
+    /// </summary>
+    private static async Task<bool> RunCreateActivationRequestAsync(string? licenseRoot)
+    {
+        await Task.CompletedTask;
+
+        try
+        {
+            var paths = SspLicensePaths.Resolve(licenseRoot);
+            var anchor = SspTrustAnchor.Inspect();
+            if (!anchor.IsUsable)
+            {
+                Console.Error.WriteLine(
+                    "[activation] activation request failed: this build has no usable Licensing " +
+                    $"Authority trust anchor. {anchor.Error}");
+                return false;
+            }
+
+            using var activation = SspActivationService.Create(paths);
+            activation.Load();
+
+            var request = activation.CreateActivationRequest();
+            if (request is null)
+            {
+                Console.Error.WriteLine(
+                    $"[activation] no activation request can be produced: the license is not awaiting activation " +
+                    $"(state {activation.CurrentState}).");
+                return false;
+            }
+
+            var json = ActivationRequestCodec.Encode(request);
+            await AtomicFile.WriteTextAsync(paths.ActivationRequestFilePath, json).ConfigureAwait(false);
+
+            Console.WriteLine($"Activation request written: {paths.ActivationRequestFilePath}");
+            Console.WriteLine($"LicenseId: {request.LicenseId:D}");
+            if (!string.IsNullOrWhiteSpace(request.ComputerName))
+            {
+                Console.WriteLine($"Computer:  {request.ComputerName}");
+            }
+
+            Console.WriteLine(
+                "Send this file to the SSP Licensing Authority, then run " +
+                "'SSP.Server --activate <code>' with the code you receive.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[activation] activation request failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Activates the installed license with the operator-supplied 10-digit code. The code
+    /// is verified by <see cref="LicenseManager.TryActivate"/> against the hash the
+    /// authority signed into the license's key certification; SSP.Server never generates
+    /// a code itself.
+    /// </summary>
+    private static async Task<bool> RunActivateAsync(string code, string? licenseRoot)
+    {
+        await Task.CompletedTask;
+
+        try
+        {
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                Console.Error.WriteLine("[activation] an activation code is required.");
+                return false;
+            }
+
+            var paths = SspLicensePaths.Resolve(licenseRoot);
+            var anchor = SspTrustAnchor.Inspect();
+            if (!anchor.IsUsable)
+            {
+                Console.Error.WriteLine(
+                    "[activation] activation failed: this build has no usable Licensing " +
+                    $"Authority trust anchor. {anchor.Error}");
+                return false;
+            }
+
+            using var activation = SspActivationService.Create(paths);
+            activation.Load();
+
+            if (activation.CurrentState != LicenseState.ActivationRequired)
+            {
+                Console.Error.WriteLine(
+                    $"[activation] activation failed: license state is {activation.CurrentState}. " +
+                    "A license must be installed and awaiting activation.");
+                return false;
+            }
+
+            var result = activation.TryActivate(code);
+            if (result.IsValid)
+            {
+                Console.WriteLine("License activated.");
+                Console.WriteLine($"State: {result.State} ({result.ReasonCode})");
+                return true;
+            }
+
+            Console.Error.WriteLine($"[activation] activation failed: {result.State} ({result.ReasonCode}): {result.Detail}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[activation] activation failed: {ex.Message}");
             return false;
         }
     }

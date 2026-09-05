@@ -13,8 +13,11 @@ namespace SSP.Activation;
 public static class LicenseIssuer
 {
     /// <summary>
-    /// Serializes the payload canonically, signs the canonical bytes and returns the
-    /// complete artifact JSON.
+    /// Serializes the payload canonically, signs the canonical bytes with the authority key
+    /// and returns the complete LEGACY (version 1) artifact JSON. This is the single-level
+    /// format the SSP Licensing Authority has always produced; it remains valid and is the
+    /// compatibility format for existing licenses. New two-level issuance goes through
+    /// <see cref="LicenseCertificationIssuer.EncodeCertifiedLicenseArtifact"/>.
     /// </summary>
     /// <param name="payload">The license payload to issue.</param>
     /// <param name="authoritySigningKey">The licensing authority's RSA private key (caller-owned; never retained).</param>
@@ -37,6 +40,6 @@ public static class LicenseIssuer
         var algorithm = signatureAlgorithm ?? SignatureAlgorithms.RsaPssSha256;
         var canonical = LicenseCanonicalJson.Serialize(payload);
         var signature = SignatureAlgorithms.Sign(algorithm, authoritySigningKey, canonical);
-        return LicenseArtifactCodec.Encode(payload, algorithm, LicenseArtifactCodec.CurrentArtifactVersion, signature);
+        return LicenseArtifactCodec.Encode(payload, algorithm, LicenseArtifactCodec.LegacyArtifactVersion, signature);
     }
 }

@@ -259,6 +259,52 @@ public sealed class SspActivationService : IDisposable
     public LicenseValidationResult Revalidate() => Manager.Revalidate();
 
     /// <summary>
+    /// Attempts to activate the currently loaded activation-required license with a
+    /// 10-digit activation code. This is the transport-independent activation step: the
+    /// server hashes the code the operator typed and compares it (constant time) with the
+    /// hash the authority signed into the license's key certification, then persists the
+    /// activation and revalidates. The server never generates a code.
+    /// </summary>
+    public LicenseValidationResult TryActivate(string activationCode) => Manager.TryActivate(activationCode);
+
+    /// <summary>
+    /// Builds the activation-request message for the currently loaded license when it is
+    /// in the <see cref="LicenseState.ActivationRequired"/> state and its certification
+    /// carries an activation OTT; otherwise returns null. This produces pure data (license
+    /// identity + OTT) — it performs no I/O and depends on no transport. The current
+    /// offline transport writes it to a file (<see cref="SspLicensePaths.ActivationRequestFilePath"/>);
+    /// a future HTTPS transport would send the same message over the network.
+    /// </summary>
+    public ActivationRequest? CreateActivationRequest()
+    {
+        var result = Manager.LastValidationResult;
+        if (result is null || result.State != LicenseState.ActivationRequired)
+        {
+            return null;
+        }
+
+        var license = result.License;
+        var certification = license?.Certification;
+        if (license is null || certification is null || string.IsNullOrEmpty(certification.ActivationOtt))
+        {
+            return null;
+        }
+
+        var payload = license.Payload;
+        return new ActivationRequest
+        {
+            LicenseId = payload.LicenseId,
+            ProductId = payload.ProductId,
+            CustomerId = payload.CustomerId,
+            OrganizationOrPersonName = payload.OrganizationOrPersonName,
+            ComputerName = payload.ComputerName,
+            InstallationId = payload.InstallationId,
+            ActivationOtt = certification.ActivationOtt,
+            RequestedAtUtc = Clock.UtcNow
+        };
+    }
+
+    /// <summary>
     /// Starts the periodic license refresh loop. Explicit, idempotent and owned
     /// by the caller that owns the service lifetime: no background work is ever
     /// started from a constructor, from <see cref="Create"/> or from
@@ -458,7 +504,9 @@ public sealed class SspActivationService : IDisposable
     public string DescribeStatus()
     {
         var result = Manager.LastValidationResult;
-        var license = Manager.CurrentLicense;
+        // During ActivationRequired the manager does not publish a CurrentLicense (it is not
+        // Valid), but the authenticated payload is still available for diagnostics.
+        var license = Manager.CurrentLicense ?? result?.License;
         var identity = SafeIdentity();
 
         var builder = new StringBuilder();
@@ -470,6 +518,13 @@ public sealed class SspActivationService : IDisposable
             builder.AppendLine($"  Detail             : {result.Detail}");
         }
 
+        if (Manager.CurrentState == LicenseState.ActivationRequired)
+        {
+            builder.AppendLine("  Action             : run 'SSP.Server --create-activation-request' to produce the");
+            builder.AppendLine("                       activation request, send it to the SSP Licensing Authority,");
+            builder.AppendLine("                       then run 'SSP.Server --activate <code>' with the returned code.");
+        }
+
         builder.AppendLine($"  Product            : {SspLicensing.ProductName} ({SspLicensing.ProductId:D})");
         builder.AppendLine($"  Trust anchor       : {DescribeTrustAnchor()}");
         builder.AppendLine($"  Installation id    : {identity}");
@@ -478,6 +533,16 @@ public sealed class SspActivationService : IDisposable
             var payload = license.Payload;
             builder.AppendLine($"  LicenseId          : {payload.LicenseId:D}");
             builder.AppendLine($"  Customer           : {payload.CustomerName}");
+            if (!string.IsNullOrWhiteSpace(payload.OrganizationOrPersonName))
+            {
+                builder.AppendLine($"  Organization       : {payload.OrganizationOrPersonName}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(payload.ComputerName))
+            {
+                builder.AppendLine($"  Computer           : {payload.ComputerName}");
+            }
+
             builder.AppendLine($"  Edition            : {payload.Edition}");
             builder.AppendLine($"  IssuedAt           : {payload.IssuedAt:o}");
             builder.AppendLine($"  NotBefore          : {payload.NotBefore:o}");

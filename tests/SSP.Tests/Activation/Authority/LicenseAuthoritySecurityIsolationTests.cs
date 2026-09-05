@@ -113,6 +113,42 @@ public sealed class LicenseAuthoritySecurityIsolationTests
     }
 
     [Fact]
+    public void CertifiedIssuanceAndCodeGeneration_AreNotReachableFromShippedRuntimeProjects()
+    {
+        var root = AuthorityTestPayload.FindRepositoryRoot();
+        if (root is null)
+        {
+            return;
+        }
+
+        var shippedTrees = new[]
+        {
+            Path.Combine(root, "src", "SSP.Server"),
+            Path.Combine(root, "src", "SSP.ServiceHost"),
+            Path.Combine(root, "src", "SSP.Client"),
+            Path.Combine(root, "src", "SSP.ServiceBuilder"),
+            Path.Combine(root, "src", "SSP.Core"),
+        };
+
+        var files = shippedTrees
+            .Where(Directory.Exists)
+            .SelectMany(dir => Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
+            .Where(file => !file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .ToArray();
+
+        // No shipped runtime source may reach the two-level issuing API, or generate
+        // activation OTTs / codes. A relying party can only VERIFY a license and VERIFY an
+        // activation code; only the Licensing Authority generates material.
+        var issuerHits = files.Where(f => File.ReadAllText(f).Contains("LicenseCertificationIssuer", StringComparison.Ordinal)).ToArray();
+        var codeGenHits = files.Where(f => File.ReadAllText(f).Contains("GenerateActivationCode", StringComparison.Ordinal)).ToArray();
+        var ottGenHits = files.Where(f => File.ReadAllText(f).Contains("GenerateActivationOtt", StringComparison.Ordinal)).ToArray();
+
+        Assert.Empty(issuerHits);
+        Assert.Empty(codeGenHits);
+        Assert.Empty(ottGenHits);
+    }
+
+    [Fact]
     public void AuthorityAssembly_EmbedsNoKeyMaterial()
     {
         var assembly = typeof(LicenseAuthorityCli).Assembly;

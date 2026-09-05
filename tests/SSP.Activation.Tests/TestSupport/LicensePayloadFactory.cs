@@ -13,6 +13,8 @@ internal sealed class LicensePayloadFactory
     private Guid _customerId = Guid.NewGuid();
     private string _productName = "SSP";
     private string _customerName = "Contoso Ltd.";
+    private string? _organizationOrPersonName;
+    private string? _computerName;
     private string _edition = "Enterprise";
     private string _licenseVersion = "1.0";
     private DateTimeOffset _issuedAt = BaseTime.AddDays(-2);
@@ -42,6 +44,10 @@ internal sealed class LicensePayloadFactory
     public LicensePayloadFactory WithCustomerId(Guid customerId) { _customerId = customerId; return this; }
 
     public LicensePayloadFactory WithCustomerName(string name) { _customerName = name; return this; }
+
+    public LicensePayloadFactory WithOrganizationOrPersonName(string? name) { _organizationOrPersonName = name; return this; }
+
+    public LicensePayloadFactory WithComputerName(string? name) { _computerName = name; return this; }
 
     public LicensePayloadFactory WithEdition(string edition) { _edition = edition; return this; }
 
@@ -81,6 +87,8 @@ internal sealed class LicensePayloadFactory
         ProductName = _productName,
         CustomerId = _customerId,
         CustomerName = _customerName,
+        OrganizationOrPersonName = _organizationOrPersonName,
+        ComputerName = _computerName,
         Edition = _edition,
         LicenseVersion = _licenseVersion,
         IssuedAt = _issuedAt,

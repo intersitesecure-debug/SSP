@@ -16,4 +16,14 @@ public sealed record LicenseStateRecord
 
     /// <summary>Time of the most recent successful validation (diagnostics).</summary>
     public DateTimeOffset? LastValidatedUtc { get; init; }
+
+    /// <summary>
+    /// Identifier of the license whose activation code has been accepted on this
+    /// installation. A null value means no license is activated yet. The validator
+    /// treats an activation-required license as <see cref="LicenseState.ActivationRequired"/>
+    /// unless this matches the license id. This field can only restrict authorization
+    /// (an activation-required license needs it); it can never grant it (the signed
+    /// artifact remains the root of trust).
+    /// </summary>
+    public Guid? ActivatedLicenseId { get; init; }
 }

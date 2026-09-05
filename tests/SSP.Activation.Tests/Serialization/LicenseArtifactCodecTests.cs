@@ -20,7 +20,10 @@ public class LicenseArtifactCodecTests
         Assert.True(decoded, error?.Detail);
         Assert.Equal(payload, licenseArtifact!.Payload);
         Assert.Equal(SignatureAlgorithms.RsaPssSha256, licenseArtifact.SignatureAlgorithm);
-        Assert.Equal(LicenseArtifactCodec.CurrentArtifactVersion, licenseArtifact.ArtifactVersion);
+        // TestAuthority.Issue uses the legacy (version 1, root-signed) issuer; the
+        // certified (version 2) round-trip is covered by LicenseArtifactCodecCertifiedTests.
+        Assert.Equal(LicenseArtifactCodec.LegacyArtifactVersion, licenseArtifact.ArtifactVersion);
+        Assert.Null(licenseArtifact.Certification);
         Assert.NotEmpty(licenseArtifact.Signature);
     }
 
@@ -123,7 +126,7 @@ public class LicenseArtifactCodecTests
 
     [Theory]
     [InlineData(0)]
-    [InlineData(2)]
+    [InlineData(3)]
     [InlineData(99)]
     public void Decode_UnknownArtifactVersion_ReturnsUnknownArtifactVersion(int version)
     {

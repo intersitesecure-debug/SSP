@@ -38,5 +38,16 @@ public enum LicenseState
     LockedDown = 9,
 
     /// <summary>Anti-rollback: the license sequence number is older than the highest accepted sequence number.</summary>
-    Superseded = 10
+    Superseded = 10,
+
+    /// <summary>
+    /// The license chain verified, but this license is activation-required and has not
+    /// been activated yet (the persisted <c>ActivatedLicenseId</c> does not match this
+    /// license). Protected operations are denied; entering the activation code transitions
+    /// the license to <see cref="Valid"/>.
+    /// </summary>
+    ActivationRequired = 11,
+
+    /// <summary>The per-license key certification failed to verify (bad root signature, unusable certified key, or a certification/license binding mismatch).</summary>
+    InvalidCertification = 12
 }

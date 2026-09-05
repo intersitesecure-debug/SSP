@@ -22,7 +22,8 @@ This threat model covers the SSP licensing subsystem end to end:
 
 * the vendored verification library `src/SSP.Activation` (`LicenseManager`,
   `LicenseValidator`, `LicenseEnforcement`, `DefaultLicensePolicy`,
-  `LicenseTrustAnchor`, codec/canonicalization);
+  `LicenseTrustAnchor`, `LicenseKeyCertification`, `LicenseCertificationIssuer`,
+  `LicenseActivation`, codec/canonicalization);
 * the SSP-native adapters and gates in `src/SSP.Server/Activation/`
   (`SspTrustAnchor`, `SspActivationService`, `SspRuntimeLicense`,
   `ISspLicenseGate`, `SspLicenseStateStore`, `SspInstallationIdentityProvider`,
@@ -46,8 +47,11 @@ code.
 | --- | --- | --- |
 | Authority **private** RSA key (3072) | Offline ceremony host / HSM, outside the repository | Never in the repo, never in any build, never in CI secrets; `.gitignore` excludes `*authority*private*.pem`; `SspTrustAnchor.targets` refuses a PEM containing `PRIVATE KEY` (`SSPTA003`) |
 | Authority **public** key (trust anchor) | Embedded in `SSP.Server.dll` at release build as resource `SSP.Server.Activation.AuthorityPublicKey.pem` | Build-time provisioning only (`SspAuthorityPublicKeyPemFile`); fingerprint pin (`SspAuthorityPublicKeySha256`) re-checked at runtime by `SspTrustAnchor.Create()`; `--trust-anchor-info` verifies the shipped binary |
-| License artifact (`license.json`) | `{product root}\licensing\` | RSA-PSS-SHA256 over canonical JSON; atomic replace via `AtomicFile`; size-capped (256 KiB); plaintext **by design** (integrity, not confidentiality) |
-| Anti-rollback floor (`.license-state.dat`) | Same directory, on `ProtectedFileStore.ProtectedFileNames` | DPAPI LocalMachine envelope on Windows (AES-GCM fallback elsewhere); can only *restrict* authorization, never grant it; corruption ⇒ `state_store_unavailable` ⇒ fail closed |
+| License artifact (`license.json`) | `{product root}\licensing\` | v1: root signs the payload; v2: root signs the per-license key certification and that leaf key signs the payload — both RSA-PSS-SHA256 over canonical JSON; atomic replace via `AtomicFile`; size-capped (256 KiB); plaintext **by design** (integrity, not confidentiality) |
+| Per-license leaf private key | Authority process memory only (ephemeral) | Generated per license, used once to sign the payload, discarded; never persisted, never in any file, never in a shipped binary |
+| Activation OTT + 10-digit code | OTT signed into the certification; code hash signed into the certification; code plaintext only in the authority activation record | Code is 10 decimal digits with its SHA-256 signed into the certification; the server can only verify a code, never generate one; the OTT is single-use, consumed only after a successful match |
+| Authority activation record (`<licenseId>.json`) | Authority ceremony host, next to the private key | Plaintext authority secret (OTT + code); never in the repository, build, CI or any customer artifact |
+| Anti-rollback floor (`.license-state.dat`) | Same directory, on `ProtectedFileStore.ProtectedFileNames` | DPAPI LocalMachine envelope on Windows (AES-GCM fallback elsewhere); also records `ActivatedLicenseId`; can only *restrict* authorization, never grant it; corruption ⇒ `state_store_unavailable` ⇒ fail closed |
 | Installation identity | Derived at runtime (`MachineGuid`) | Hashed + domain-separated (`SspLicensing.InstallationBindingPurposeTag`); raw value never leaves `SspInstallationIdentityProvider` |
 | Runtime authorization state | Per server process, `LicenseManager` under its own lock | Single authority, no cached verdicts anywhere (`LicensingCompositionTests` reflection check); `Valid → LockedDown` is sticky, cleared only by a valid artifact |
 | Usage counters (`_activeTunnels`/`_activeSessions`) | Per process, `SspRuntimeLicense` under `_admissionGate` | Atomic check-and-reserve in `AdmitTunnel()`; release exactly once via `SspTunnelAdmission.Dispose()` |
@@ -93,6 +97,12 @@ Each row: threat → surface → mitigation → **machine-checked by**.
 | T22 | Oversized artifact DoS | Codec caps artifact length (256 KiB); provider refuses oversized files, fail-closed | `LicenseArtifactCodecTests`; `LocalLicenseFileProviderTests` |
 | T23 | Partial/corrupt license file mid-read | `AtomicFile` temp+move installs and provider reads; readers never observe partial artifacts | `LicenseFileWritesAreAtomic_NoPartialArtifactIsEverLeftReadable`; `SspLicenseInstallerTests` |
 | T24 | Off-machine state reuse / identity drift | DPAPI LocalMachine envelope binds the floor to the machine; identity is derived from the machine's own registry | `SspLicenseStateStoreTests`; `InstallationBindingTests` |
+| T25 | Public-key substitution inside a license (v2) | A public key inside a license is never a trust anchor: the root signature over its certification must verify first; substituting the certified key breaks the root signature | `LicenseKeyCertificationTests.PublicKeySubstitution_IsRejected` |
+| T26 | Self-generated license / self-signed certification (v2) | The root authority is the only trust anchor; a certification not signed by the compiled-in root fails (`invalid_certification_signature`) | `LicenseKeyCertificationTests.CertificationSignedByWrongRoot_IsRejected` |
+| T27 | License A key compromise forging license B (v2) | Each license gets a fresh leaf key; the certification binds `LicenseId`/`ProductId`/`CustomerId` to the certified SPKI, so A's key cannot authenticate B's payload (binding mismatch) | `LicenseKeyCertificationTests.LicenseAKey_CannotForgeLicenseB`; `CertificationForAnotherLicense_IsRejected_AsBindingMismatch` |
+| T28 | Certification tampering / expiry / unusable key (v2) | Certification is canonicalized and root-signed; tampering fails the signature; an expired / not-yet-valid / undersized certified key fails closed | `LicenseKeyCertificationTests` (tamper/expiry/not-yet-valid/undersized cases) |
+| T29 | Activation bypass: guessing or replaying a code, or activating the wrong license | Code is 10 digits (100-bit entropy), hashed with SHA-256 into the certification and compared constant-time; the persisted `ActivatedLicenseId` binds activation to exactly one license; a wrong code keeps `ActivationRequired` | `ActivationLifecycleTests`; `LicenseActivationTests` |
+| T30 | Offline activation-request forgery / OTT replay | The OTT is authority-generated 256-bit random, signed into the certification, and matched constant-time against the authority's own record; it is single-use and consumed only on a successful match | `LicenseAuthorityActivationTests`; `LicenseActivationTests.OttMatches_IsConstantTimeAndStrict` |
 
 ## 5. Build-time trust decisions (recorded here, as the blueprint requires)
 
@@ -149,9 +159,12 @@ possible without behavioural change; the reference audit rated it Low.
 7. The system clock is host-controlled; `notBefore`/`expiresAt` plus the
    anti-rollback floor mitigate, but do not eliminate, clock manipulation on
    air-gapped machines.
-8. SSP is **offline**: no online revocation/activation channel exists (the
-   `ILicenseRevocationChecker` seam is available but unused). Revocation is a
-   signed re-issue.
+8. SSP is **offline**: revocation is a signed re-issue and licensing activation
+   is an offline, out-of-band exchange (an activation-request file produced by
+   `SSP.Server --create-activation-request`, answered by the authority
+   `activate` command, and entered with `SSP.Server --activate <code>`). No
+   online revocation/activation channel exists (the `ILicenseRevocationChecker`
+   seam is available but unused).
 
 ## 8. Known limitations (copied forward from reference §15, extended with SSP specifics)
 
@@ -175,6 +188,18 @@ possible without behavioural change; the reference audit rated it Low.
   reflection tests in §4.
 * **Artifacts are plaintext signed JSON** (integrity, not confidentiality);
   payload fields such as customer name are readable by anyone holding the file.
+* **The authority activation record is plaintext authority secret** (it holds
+  the plaintext 10-digit code). It is only ever written authority-side, next to
+  the private key, and is never shipped. The license artifact itself never
+  contains the code (only its hash).
+* **Renewal of a certified (v2) license is a fresh `issue-certified`**, not
+  `renew`: `renew` verifies the legacy root-signature-over-payload and will
+  refuse a v2 artifact (fail-closed) rather than mint a leaf signature with the
+  root key.
+* **Activation is per `LicenseId`.** A renewal (a new license id) that is
+  activation-required needs its own activation; the authority can instead issue
+  a pre-activated renewal (no activation material) if immediate validity is
+  intended.
 * **Artifact size is bounded** (256 KiB cap, fail-closed) to blunt resource
   exhaustion.
 * **Clock manipulation** is only partially mitigable offline (§7.7).
@@ -198,6 +223,7 @@ possible without behavioural change; the reference audit rated it Low.
 | Item | Record |
 | --- | --- |
 | Scope reviewed | §1–§9, source-evidence based, on branch `arena/01a06c90-ssp` (2026-09-04) |
+| v2 extension reviewed | Two-level certified chain (v2 artifacts), per-license leaf keys, offline activation (OTT + 10-digit code), `OrganizationOrPersonName`/`ComputerName` identity fields; threats T25–T30 added; on branch `arena/01a06e0b-ssp` (2026-09-05) |
 | Enforcement seams verified | EP0a/EP0b (`SetupEngine`), EP1 (`CreateForService` in `Program.RunServiceModeAsync` + `SspWindowsService.OnStart`), EP2 (enrollment, pre-OTT), EP3 (single choke point, post-authentication), EP-T (one revalidation timer) |
 | Machine-checked mitigations | §4 table: every row cites a test that exists in the repository and runs in the standard test suites |
 | Dev/fail-closed posture | Intentional; no production trust anchor or private key exists in, or can enter, this repository (see §5 and `TRUST_ANCHOR_KEY_CEREMONY.md`) |

@@ -7,7 +7,8 @@
 //
 //   {Canonical Product Root}/licensing/
 //   ├── license.json               (the signed artifact; transport only)
-//   ├── .license-state.dat         (DPAPI-encrypted anti-rollback floor)
+//   ├── activation-request.json    (offline activation request; transport only)
+//   ├── .license-state.dat         (DPAPI-encrypted anti-rollback floor + activated license id)
 //   └── ssp-activation-security.log(security event log)
 //
 // The product root is the canonical one resolved through
@@ -40,6 +41,13 @@ public sealed record SspLicensePaths
     public const string LicenseFileName = "license.json";
 
     /// <summary>
+    /// Name of the activation-request file written when a license is awaiting activation.
+    /// Transport only: the file carries the license identity and the activation OTT for
+    /// out-of-band delivery to the Licensing Authority. Not a security boundary.
+    /// </summary>
+    public const string ActivationRequestFileName = "activation-request.json";
+
+    /// <summary>
     /// Name of the encrypted anti-rollback state file. Kept in sync with
     /// <see cref="SspLicenseStateStore.DefaultFileName"/>; the constant is
     /// repeated here so path resolution and the store can never disagree.
@@ -69,6 +77,9 @@ public sealed record SspLicensePaths
 
     /// <summary>Full path of the signed license artifact read by the license provider.</summary>
     public string LicenseFilePath => Path.Combine(LicenseDirectory, LicenseFileName);
+
+    /// <summary>Full path of the activation-request file (offline transport, written by SSP.Server).</summary>
+    public string ActivationRequestFilePath => Path.Combine(LicenseDirectory, ActivationRequestFileName);
 
     /// <summary>Full path of the encrypted anti-rollback state file.</summary>
     public string StateStorePath => Path.Combine(LicenseDirectory, StateFileName);
