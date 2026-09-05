@@ -242,8 +242,8 @@ public sealed class SetupEngine
         using var rsa = RsaCrypto.GenerateKeyPair();
         var privPem = RsaCrypto.ExportPrivateKeyPem(rsa);
         var pubPem = RsaCrypto.ExportPublicKeyPem(rsa);
-        await PemStore.SavePrivateKeyAsync(privPath, privPem, ct);
-        await PemStore.SavePublicKeyAsync(pubPath, pubPem, ct);
+        await PemStore.SavePrivateKeyAsync(privPath, privPem, ct: ct);
+        await PemStore.SavePublicKeyAsync(pubPath, pubPem, ct: ct);
         Result.ServerPrivateKeyPath = privPath;
         Result.ServerPublicKeyPath = pubPath;
 
@@ -406,7 +406,7 @@ public sealed class SetupEngine
         await AuthorizeAdditionalClientAsync(authPath, ct).ConfigureAwait(false);
 
         // Load existing public key
-        var pubPem = await PemStore.LoadPublicKeyAsync(pubPath, ct);
+        var pubPem = await PemStore.LoadPublicKeyAsync(pubPath, ct: ct);
 
         // Generate new OTT
         var ott = TokenGenerator.GenerateOneTimeToken();
