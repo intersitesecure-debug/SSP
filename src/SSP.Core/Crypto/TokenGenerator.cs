@@ -72,20 +72,17 @@ public static class TokenGenerator
 
     /// <summary>
     /// Generate a cryptographically secure 10-digit authentication code.
-    /// The first digit is guaranteed to be non-zero so the value always
-    /// has exactly 10 digits when formatted as a string.
+    /// Digits are sampled without modulo bias via
+    /// <see cref="RandomNumberGenerator.GetInt32(int, int)"/>. The first
+    /// digit is uniformly chosen from 1-9 so the value always has exactly
+    /// 10 decimal digits; the remaining nine digits are uniform over 0-9.
     /// </summary>
     public static string GenerateAuthenticationCode()
     {
-        var bytes = RandomNumberGenerator.GetBytes(AuthenticationCodeDigits);
         var sb = new StringBuilder(AuthenticationCodeDigits);
-        for (var i = 0; i < AuthenticationCodeDigits; i++)
-        {
-            var digit = bytes[i] % 10;
-            if (i == 0 && digit == 0)
-                digit = 1; // ensure the first digit is non-zero
-            sb.Append((char)('0' + digit));
-        }
+        sb.Append((char)('0' + RandomNumberGenerator.GetInt32(1, 10)));
+        for (var i = 1; i < AuthenticationCodeDigits; i++)
+            sb.Append((char)('0' + RandomNumberGenerator.GetInt32(0, 10)));
         return sb.ToString();
     }
 

@@ -208,9 +208,13 @@ possible without behavioural change; the reference audit rated it Low.
 * **Clock manipulation** is only partially mitigable offline (§7.7).
 * **Enrollment attempt tracking is local server state.** A local administrator
   who can restore an older protected `.cache.dat` together with the surrounding
-  machine state may restore an earlier attempt count. Phase 1 prevents remote
-  unlimited guessing and survives ordinary process/service restarts; stronger
-  anti-rollback protection is intentionally deferred to roadmap Phase 4.
+  machine state may restore an earlier attempt count or cooldown timestamp.
+  Phase 1 prevents remote unlimited guessing and survives ordinary
+  process/service restarts; Phase 2 adds an offline per-OTT cooldown in front
+  of the remaining guesses. Stronger anti-rollback protection is intentionally
+  deferred to roadmap Phase 4. Host clock changes can shorten or lengthen the
+  cooldown (Phase 6); they cannot restore attempts after the OTT has been
+  revoked, and three guesses against a 10-digit code remain infeasible.
 * **A revoked enrollment OTT requires reprovisioning.** Three operator typing
   mistakes permanently invalidate that client package by design; recovery is
   to provision a new package/OTT through the existing offline setup workflow.
