@@ -63,7 +63,7 @@ GitHub Advisory Database (`GET /advisories?ecosystem=nuget`), which reported
 | `System.ServiceProcess.ServiceController` | 8.0.0 | `SSP.Server` | SCM client used by `WindowsServiceInstaller` / service start verification. |
 | `System.CommandLine` | 2.0.0-beta4.22272.1 | `SSP.Server`, `SSP.ServiceBuilder` | Same version in both, so no downgrade or unification conflict (NU1510/NU1605/MSB3277 stay quiet). The pinned beta is the only published form of the 2.0 line. |
 | `Microsoft.NET.Test.Sdk` | 17.8.0 | both test projects | |
-| `xunit` | 2.5.3 | both test projects | Brings `xunit.analyzers`; that is what makes `tests/SSP.Activation.Tests` (strict) sensitive to `xUnit1xxx`/`xUnit2xxx` diagnostics. |
+| `xunit` | 2.5.3 | both test projects | Brings `xunit.analyzers`; that is what makes `tests/SSP.Activation.Tests` (strict) sensitive to `xUnit1xxx`/`xUnit2xxx` diagnostics. **2.5.3 has no user-message overload of `Assert.Equal`**: the third argument is a COMPARER (`IEqualityComparer<T>` or `Func<T, T, bool>`), so `Assert.Equal(expected, actual, "why")` fails to bind with `CS1503: cannot convert from 'string' to 'System.Func<T, T, bool>'`. Message-bearing value comparisons go through `Assert.True(condition, message)` (see `tests/SSP.Tests/ClientIdentityKeyProtectionTests.AssertEnvelopeScope`). |
 | `xunit.runner.visualstudio` | 2.5.3 | both test projects | Version-matched to `xunit`. |
 | `coverlet.collector` | 6.0.0 | both test projects | |
 
