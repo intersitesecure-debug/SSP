@@ -46,9 +46,16 @@ internal sealed class ActivationRecord
 /// <summary>Loads and atomically persists the authority-side activation records.</summary>
 internal static class ActivationRecordStore
 {
+    // The record file format is camelCase (licenseId, activationOtt, activationCode,
+    // consumed, consumedAtUtc), matching every other SSP JSON message (the license
+    // artifact, the activation request). Deserialization stays case-insensitive so a
+    // record written before this change (PascalCase) is still readable: activation is
+    // single-use and an operator must never lose a still-consumable record to a format
+    // change in the tool.
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true,
     };
 

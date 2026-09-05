@@ -16,6 +16,7 @@ public sealed class LicenseAuthorityActivationTests
         string privateKey,
         string output,
         string? activationRecord = null,
+        bool activationRequired = false,
         Guid? customerId = null,
         string? installationId = "INSTALLATION-A",
         string? organizationName = null,
@@ -64,9 +65,13 @@ public sealed class LicenseAuthorityActivationTests
             args.Add(computerName);
         }
 
-        if (activationRecord is not null)
+        if (activationRequired || activationRecord is not null)
         {
             args.Add("--activation-required");
+        }
+
+        if (activationRecord is not null)
+        {
             args.Add("--activation-record");
             args.Add(activationRecord);
         }
@@ -237,7 +242,8 @@ public sealed class LicenseAuthorityActivationTests
         var priv = ws.PathTo("priv.pem");
         File.WriteAllText(priv, pair.PrivatePem);
 
-        var result = await ws.Run(CertifiedArgs(priv, ws.PathTo("license.json"), activationRecord: null));
+        // --activation-required WITHOUT --activation-record must fail closed.
+        var result = await ws.Run(CertifiedArgs(priv, ws.PathTo("license.json"), activationRequired: true));
         Assert.NotEqual(0, result.Exit);
         Assert.Contains("--activation-record is required", result.Stderr, StringComparison.OrdinalIgnoreCase);
     }
