@@ -22,12 +22,13 @@ public static class LicenseAuthorityCli
 {
     private static readonly HashSet<string> KnownCommands = new(StringComparer.Ordinal)
     {
-        "keygen", "export-public", "fingerprint", "issue", "renew", "inspect", "verify", "help", "--help", "-h"
+        "keygen", "export-public", "fingerprint", "issue", "issue-certified", "renew",
+        "inspect", "verify", "activate", "help", "--help", "-h"
     };
 
     private static readonly HashSet<string> FlagNames = new(StringComparer.Ordinal)
     {
-        "--force", "-f", "--help", "-h"
+        "--force", "-f", "--help", "-h", "--activation-required"
     };
 
     private static readonly HashSet<string> KnownOptionNames = new(StringComparer.Ordinal)
@@ -42,6 +43,8 @@ public static class LicenseAuthorityCli
         "--product-name",
         "--customer-id",
         "--customer-name",
+        "--organization-name",
+        "--computer-name",
         "--edition",
         "--license-version",
         "--issued-at",
@@ -57,6 +60,9 @@ public static class LicenseAuthorityCli
         "--now",
         "--expect-fingerprint",
         "--highest-accepted-sequence",
+        "--activation-required",
+        "--activation-record",
+        "--request",
     };
 
     public static Task<int> RunAsync(
@@ -154,6 +160,8 @@ public static class LicenseAuthorityCli
                 productName: parsed.Get("--product-name"),
                 customerId: parsed.Get("--customer-id"),
                 customerName: parsed.Get("--customer-name"),
+                organizationName: parsed.Get("--organization-name"),
+                computerName: parsed.Get("--computer-name"),
                 edition: parsed.Get("--edition"),
                 licenseVersion: parsed.Get("--license-version"),
                 issuedAt: parsed.Get("--issued-at"),
@@ -165,6 +173,31 @@ public static class LicenseAuthorityCli
                 limits: parsed.GetAll("--limit"),
                 status: parsed.Get("--status"),
                 sequence: parsed.GetLong("--sequence"),
+                force: parsed.Force),
+            "issue-certified" => RunIssueCertified(
+                privateKeyPath: parsed.Get("--private-key"),
+                outputPath: parsed.Get("--output"),
+                specPath: parsed.Get("--spec"),
+                licenseId: parsed.Get("--license-id"),
+                productId: parsed.Get("--product-id"),
+                productName: parsed.Get("--product-name"),
+                customerId: parsed.Get("--customer-id"),
+                customerName: parsed.Get("--customer-name"),
+                organizationName: parsed.Get("--organization-name"),
+                computerName: parsed.Get("--computer-name"),
+                edition: parsed.Get("--edition"),
+                licenseVersion: parsed.Get("--license-version"),
+                issuedAt: parsed.Get("--issued-at"),
+                notBefore: parsed.Get("--not-before"),
+                expiresAt: parsed.Get("--expires-at"),
+                validForDays: parsed.GetInt("--valid-for-days"),
+                installationId: parsed.Get("--installation-id"),
+                features: parsed.GetAll("--feature"),
+                limits: parsed.GetAll("--limit"),
+                status: parsed.Get("--status"),
+                sequence: parsed.GetLong("--sequence"),
+                activationRequired: parsed.HasFlag("--activation-required"),
+                activationRecordPath: parsed.Get("--activation-record"),
                 force: parsed.Force),
             "renew" => RunRenew(
                 privateKeyPath: parsed.Get("--private-key"),
@@ -181,6 +214,9 @@ public static class LicenseAuthorityCli
                 sequence: parsed.GetLong("--sequence"),
                 force: parsed.Force),
             "inspect" => RunInspect(parsed.Get("--license")),
+            "activate" => RunActivate(
+                requestPath: parsed.Get("--request"),
+                activationRecordPath: parsed.Get("--activation-record")),
             "verify" => RunVerify(
                 licensePath: parsed.Get("--license"),
                 publicKeyPath: parsed.Get("--public-key"),
@@ -211,13 +247,17 @@ public static class LicenseAuthorityCli
         Console.WriteLine("Never shipped with SSP. Never embeds or logs a private key.");
         Console.WriteLine();
         Console.WriteLine("Commands:");
-        Console.WriteLine("  keygen         Generate a production RSA-3072 authority key pair.");
-        Console.WriteLine("  export-public  Export only the public key from a private key file.");
-        Console.WriteLine("  fingerprint    Show / verify the public-key SPKI SHA-256 fingerprint.");
-        Console.WriteLine("  issue          Sign a license artifact with LicenseIssuer (ssp-license v1).");
-        Console.WriteLine("  renew          Re-issue an existing artifact with a higher sequence number.");
-        Console.WriteLine("  inspect        Decode an artifact without verifying the signature.");
-        Console.WriteLine("  verify         Validate an artifact with LicenseValidator against a public key.");
+        Console.WriteLine("  keygen          Generate a production RSA-3072 authority key pair.");
+        Console.WriteLine("  export-public   Export only the public key from a private key file.");
+        Console.WriteLine("  fingerprint     Show / verify the public-key SPKI SHA-256 fingerprint.");
+        Console.WriteLine("  issue           Sign a legacy ssp-license v1 artifact (root signs the payload).");
+        Console.WriteLine("  issue-certified Sign a v2 artifact: root certifies a fresh per-license key,");
+        Console.WriteLine("                  that key signs the payload; optional activation OTT + code.");
+        Console.WriteLine("  renew           Re-issue an existing artifact with a higher sequence number.");
+        Console.WriteLine("  inspect         Decode an artifact without verifying the signature.");
+        Console.WriteLine("  verify          Validate an artifact with LicenseValidator against a public key.");
+        Console.WriteLine("  activate        Validate an offline activation request against an activation");
+        Console.WriteLine("                  record and print the single-use 10-digit activation code.");
         Console.WriteLine();
         Console.WriteLine("See docs/LICENSE_AUTHORITY.md.");
     }
@@ -364,6 +404,8 @@ public static class LicenseAuthorityCli
         string? productName,
         string? customerId,
         string? customerName,
+        string? organizationName,
+        string? computerName,
         string? edition,
         string? licenseVersion,
         string? issuedAt,
@@ -391,6 +433,8 @@ public static class LicenseAuthorityCli
                 productName,
                 customerId,
                 customerName,
+                organizationName,
+                computerName,
                 edition,
                 licenseVersion,
                 issuedAt,
@@ -560,6 +604,195 @@ public static class LicenseAuthorityCli
         }
     }
 
+    internal static int RunIssueCertified(
+        string? privateKeyPath,
+        string? outputPath,
+        string? specPath,
+        string? licenseId,
+        string? productId,
+        string? productName,
+        string? customerId,
+        string? customerName,
+        string? organizationName,
+        string? computerName,
+        string? edition,
+        string? licenseVersion,
+        string? issuedAt,
+        string? notBefore,
+        string? expiresAt,
+        int? validForDays,
+        string? installationId,
+        string[]? features,
+        string[]? limits,
+        string? status,
+        long? sequence,
+        bool activationRequired,
+        string? activationRecordPath,
+        bool force)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(privateKeyPath) || string.IsNullOrWhiteSpace(outputPath))
+            {
+                throw new AuthorityToolException("--private-key and --output are required.");
+            }
+
+            if (activationRequired && string.IsNullOrWhiteSpace(activationRecordPath))
+            {
+                throw new AuthorityToolException("--activation-record is required when --activation-required is set.");
+            }
+
+            // Refuse to overwrite existing files up front (both deliverables), so a
+            // half-issued license (artifact written, activation record refused) cannot happen.
+            EnsureWritable(outputPath, force);
+            if (activationRequired)
+            {
+                EnsureWritable(activationRecordPath!, force);
+            }
+
+            var request = BuildIssueRequest(
+                specPath, licenseId, productId, productName, customerId, customerName,
+                organizationName, computerName, edition, licenseVersion, issuedAt, notBefore,
+                expiresAt, validForDays, installationId, features, limits, status, sequence,
+                defaultNow: DateTimeOffset.UtcNow);
+
+            WarnUnknownVocabulary(request);
+            if (string.IsNullOrEmpty(request.InstallationId))
+            {
+                Console.Error.WriteLine(
+                    "warning: issuing a floating license (no --installation-id). " +
+                    "Production SSP licenses should be bound to the customer's installation id.");
+            }
+
+            var payload = LicenseIssuance.ToPayload(request);
+            using var authorityKey = AuthorityKeyMaterial.LoadPrivateKey(privateKeyPath);
+            WarnIfWeak(authorityKey, privateKeyPath);
+
+            // A fresh per-license leaf key pair. The private half never leaves this process
+            // and is never persisted, so a later license gets its own independent key.
+            using var leafKey = RSA.Create(AuthorityKeyMaterial.MinimumKeySizeBits);
+
+            string? activationOtt = null;
+            string? activationCodeHash = null;
+            string? activationCode = null;
+            if (activationRequired)
+            {
+                activationOtt = LicenseActivation.GenerateActivationOtt();
+                activationCode = LicenseActivation.GenerateActivationCode();
+                activationCodeHash = LicenseActivation.ComputeActivationCodeHash(activationCode);
+            }
+
+            // The certification binds exactly this license identity to the leaf public key,
+            // and carries the activation material the customer cannot replace (it is signed).
+            var certification = new LicenseKeyCertification
+            {
+                LicenseId = payload.LicenseId,
+                ProductId = payload.ProductId,
+                CustomerId = payload.CustomerId,
+                NotBefore = payload.IssuedAt,
+                ExpiresAt = payload.ExpiresAt,
+                PublicKeySpkiDer = leafKey.ExportSubjectPublicKeyInfo(),
+                ActivationOtt = activationOtt,
+                ActivationCodeHash = activationCodeHash
+            };
+
+            var artifact = LicenseCertificationIssuer.EncodeCertifiedLicenseArtifact(
+                payload, certification, authorityKey, leafKey);
+            AuthorityKeyMaterial.WriteArtifactFile(outputPath, artifact, force);
+
+            Console.WriteLine($"License issued (certified) : {Path.GetFullPath(outputPath)}");
+            Console.WriteLine($"  Signature algorithm        : {SignatureAlgorithms.RsaPssSha256}");
+            Console.WriteLine($"  Authority SPKI SHA-256     : {AuthorityKeyMaterial.ComputeSpkiSha256Hex(authorityKey)}");
+            Console.WriteLine($"  Leaf SPKI SHA-256          : {AuthorityKeyMaterial.ComputeSpkiSha256Hex(leafKey)}");
+
+            if (activationRequired)
+            {
+                ActivationRecordStore.Save(activationRecordPath!, new ActivationRecord
+                {
+                    LicenseId = payload.LicenseId,
+                    ActivationOtt = activationOtt!,
+                    ActivationCode = activationCode!
+                }, force);
+
+                Console.WriteLine($"  Activation record          : {Path.GetFullPath(activationRecordPath!)}");
+                Console.WriteLine($"  Activation code            : {activationCode}");
+                Console.WriteLine(
+                    "The activation record is authority secret material. Keep it with the authority " +
+                    "private key - outside the repository, the build and every customer artifact.");
+            }
+
+            Console.Write(LicenseIssuance.DescribePayload(payload));
+            return 0;
+        }
+        catch (AuthorityToolException ex)
+        {
+            Console.Error.WriteLine($"error: {ex.Message}");
+            return 1;
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine($"error: {ex.Message}");
+            return 1;
+        }
+    }
+
+    internal static int RunActivate(string? requestPath, string? activationRecordPath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(requestPath) || string.IsNullOrWhiteSpace(activationRecordPath))
+            {
+                throw new AuthorityToolException("--request and --activation-record are required.");
+            }
+
+            var requestJson = AuthorityKeyMaterial.ReadTextFile(requestPath, "activation request");
+            if (!ActivationRequestCodec.TryDecode(requestJson, out var request, out var requestError) || request is null)
+            {
+                throw new AuthorityToolException(
+                    requestError is null
+                        ? "Activation request could not be decoded."
+                        : $"Activation request could not be decoded: {requestError.Detail}");
+            }
+
+            var record = ActivationRecordStore.Load(activationRecordPath);
+
+            if (record.LicenseId != request.LicenseId)
+            {
+                throw new AuthorityToolException(
+                    $"The activation record is for license {record.LicenseId:D}, but the request is for license {request.LicenseId:D}. Refusing.");
+            }
+
+            if (record.Consumed)
+            {
+                throw new AuthorityToolException(
+                    "This activation record has already been consumed. Activation is single-use; issue a new activation-required license for a new code.");
+            }
+
+            // Constant-time OTT comparison. The OTT's authority comes from the authority's
+            // own record; a forged or replayed request simply does not match.
+            if (!LicenseActivation.OttMatches(record.ActivationOtt, request.ActivationOtt))
+            {
+                throw new AuthorityToolException("The activation OTT in the request does not match this activation record. Refusing.");
+            }
+
+            // Consume ONLY after successful validation (single-use, not consumed before activation).
+            var consumedAt = DateTimeOffset.UtcNow;
+            ActivationRecordStore.Save(activationRecordPath, record.MarkConsumed(consumedAt), overwrite: true);
+
+            Console.WriteLine("SSP license activation");
+            Console.WriteLine($"  LicenseId : {record.LicenseId:D}");
+            Console.WriteLine($"  Consumed  : {ActivationRecordStore.FormatTime(consumedAt)}");
+            Console.WriteLine($"  Code      : {record.ActivationCode}");
+            Console.WriteLine("Give this 10-digit code to the customer. Each code is single-use.");
+            return 0;
+        }
+        catch (AuthorityToolException ex)
+        {
+            Console.Error.WriteLine($"error: {ex.Message}");
+            return 1;
+        }
+    }
+
     internal static int RunInspect(string? licensePath)
     {
         try
@@ -680,6 +913,8 @@ public static class LicenseAuthorityCli
         string? productName,
         string? customerId,
         string? customerName,
+        string? organizationName,
+        string? computerName,
         string? edition,
         string? licenseVersion,
         string? issuedAt,
@@ -704,6 +939,8 @@ public static class LicenseAuthorityCli
             ?? throw new AuthorityToolException("--customer-id is required (or supply customerId in --spec).");
         var resolvedCustomerName = FirstString(customerName, spec?.CustomerName)
             ?? throw new AuthorityToolException("--customer-name is required (or supply customerName in --spec).");
+        var resolvedOrganization = FirstString(organizationName, spec?.OrganizationName);
+        var resolvedComputer = FirstString(computerName, spec?.ComputerName);
         var resolvedEdition = FirstString(edition, spec?.Edition)
             ?? throw new AuthorityToolException("--edition is required (or supply edition in --spec).");
         var resolvedVersion = FirstString(licenseVersion, spec?.LicenseVersion) ?? "1.0";
@@ -754,6 +991,8 @@ public static class LicenseAuthorityCli
             ProductName = resolvedProductName,
             CustomerId = resolvedCustomerId,
             CustomerName = resolvedCustomerName,
+            OrganizationOrPersonName = resolvedOrganization,
+            ComputerName = resolvedComputer,
             Edition = resolvedEdition,
             LicenseVersion = resolvedVersion,
             IssuedAt = resolvedIssuedAt,

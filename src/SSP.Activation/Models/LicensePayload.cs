@@ -24,6 +24,23 @@ public sealed record LicensePayload
     /// <summary>Human readable customer name (informational).</summary>
     public required string CustomerName { get; init; }
 
+    /// <summary>
+    /// Organization (or person) the license is issued to. Administrative
+    /// identity, cryptographically covered by the license signature; shown in
+    /// status reports and the activation request. Optional (null/empty = omitted
+    /// from the canonical form, preserving legacy artifacts byte-for-byte).
+    /// </summary>
+    public string? OrganizationOrPersonName { get; init; }
+
+    /// <summary>
+    /// Target computer name the license is administratively bound to.
+    /// Informational/administrative binding (the cryptographic installation
+    /// binding is <see cref="InstallationId"/>, unchanged). Cryptographically
+    /// covered by the license signature. Optional (null/empty = omitted from
+    /// the canonical form, preserving legacy artifacts byte-for-byte).
+    /// </summary>
+    public string? ComputerName { get; init; }
+
     /// <summary>Commercial edition, e.g. "Professional" or "Enterprise" (informational).</summary>
     public required string Edition { get; init; }
 

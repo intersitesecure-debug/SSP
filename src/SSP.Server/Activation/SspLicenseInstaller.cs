@@ -31,9 +31,13 @@ public static class SspLicenseInstaller
 
         // LoadLicense runs the complete existing validation pipeline, including
         // signature, product, installation, validity window, revocation and
-        // anti-rollback checks. Do not write anything unless it passes.
+        // anti-rollback checks. Do not write anything unless it passes. An
+        // activation-required license (chain verified, awaiting its code) is
+        // accepted for installation so it can then be activated; every other
+        // non-valid state is rejected.
         var result = activation.Manager.LoadLicense(artifact);
-        if (!result.IsValid)
+        var acceptable = result.IsValid || result.State == LicenseState.ActivationRequired;
+        if (!acceptable)
             return result;
 
         // AtomicFile writes a sibling temporary file and replaces the target,

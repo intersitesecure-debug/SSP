@@ -13,7 +13,13 @@ public enum LicenseSecurityEventType
     LicenseLockdownActivated = 8,
     LicenseLockdownCleared = 9,
     LicenseSuperseded = 10,
-    ProtectedOperationDenied = 11
+    ProtectedOperationDenied = 11,
+
+    /// <summary>A license validated to the ActivationRequired state (chain verified, awaiting the activation code).</summary>
+    ActivationRequired = 12,
+
+    /// <summary>An activation code was accepted and the license transitioned to Valid.</summary>
+    LicenseActivated = 13
 }
 
 /// <summary>

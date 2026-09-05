@@ -272,6 +272,99 @@ public sealed class LicenseManager : ILicenseManager
         }
     }
 
+    /// <summary>
+    /// Attempts to activate the currently loaded activation-required license with a
+    /// 10-digit code. The code is hashed and compared (constant time) with the hash the
+    /// authority signed into the license's key certification; a match persists
+    /// <c>ActivatedLicenseId</c> (bound to exactly this license) and revalidates, so the
+    /// same license transitions to <see cref="LicenseState.Valid"/>.
+    ///
+    /// Fail-closed by construction:
+    ///   * no pending activation-required license -> no transition;
+    ///   * wrong code -> stays ActivationRequired with <c>invalid_activation_code</c>;
+    ///   * activation state cannot be persisted -> stays ActivationRequired;
+    ///   * a replay for another license id cannot activate it (the persisted id must match).
+    /// The server never generates a code here — it can only verify one.
+    /// </summary>
+    public LicenseValidationResult TryActivate(string activationCode)
+    {
+        if (activationCode is null)
+        {
+            throw new ArgumentNullException(nameof(activationCode));
+        }
+
+        lock (_gate)
+        {
+            var pending = _lastResult;
+            var pendingLicense = pending?.License;
+            var certification = pendingLicense?.Certification;
+
+            if (pending is null || pending.State != LicenseState.ActivationRequired ||
+                pendingLicense is null || certification is null)
+            {
+                var noPending = LicenseValidationResult.Fail(
+                    LicenseState.ActivationRequired,
+                    LicenseReasons.ActivationRequired,
+                    "There is no license awaiting activation. Load an activation-required license first.");
+                _eventSink.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, noPending));
+                return noPending;
+            }
+
+            if (!LicenseActivation.ActivationCodeMatches(certification.ActivationCodeHash, activationCode))
+            {
+                var rejected = LicenseValidationResult.Fail(
+                    LicenseState.ActivationRequired,
+                    LicenseReasons.InvalidActivationCode,
+                    "The activation code did not match this license.",
+                    pendingLicense);
+                _lastResult = rejected;
+                PublishSnapshot();
+                _eventSink.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, rejected));
+                return rejected;
+            }
+
+            // Persist activation bound to exactly this license id. A single-use, durable
+            // record: it can only ever mark ONE license activated, and it is what makes
+            // activation survive restart.
+            try
+            {
+                var record = _stateStore.Load() ?? new LicenseStateRecord();
+                _stateStore.Save(record with { ActivatedLicenseId = pendingLicense.Payload.LicenseId });
+            }
+            catch (Exception ex)
+            {
+                var persistFailed = LicenseValidationResult.Fail(
+                    LicenseState.ActivationRequired,
+                    LicenseReasons.StateStoreUnavailable,
+                    $"Activation state could not be persisted: {ex.GetType().Name}",
+                    pendingLicense);
+                _lastResult = persistFailed;
+                PublishSnapshot();
+                _eventSink.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, persistFailed));
+                return persistFailed;
+            }
+
+            // Re-run validation so the validator observes the persisted activation state
+            // and emits the Valid transition (this also performs the normal anti-rollback
+            // bookkeeping for the now-accepted license).
+            var revalidated = Revalidate();
+            if (revalidated.IsValid)
+            {
+                _eventSink.Report(new LicenseSecurityEvent
+                {
+                    EventType = LicenseSecurityEventType.LicenseActivated,
+                    OccurredAtUtc = _clock.UtcNow,
+                    State = LicenseState.Valid,
+                    LicenseId = pendingLicense.Payload.LicenseId,
+                    ReasonCode = LicenseReasons.Ok,
+                    Detail = "License activated successfully."
+                });
+            }
+
+            return revalidated;
+        }
+    }
+
     private LicenseValidationResult Apply(LicenseValidationResult result, string? artifactJson)
     {
         lock (_gate)
@@ -345,6 +438,18 @@ public sealed class LicenseManager : ILicenseManager
                     _eventSink.Report(MakeEvent(LicenseSecurityEventType.LicenseLockdownCleared, result));
                 }
 
+                return result;
+            }
+
+            if (result.State == LicenseState.ActivationRequired)
+            {
+                // The chain verified but this license needs its activation code. This is a
+                // normal intermediate state, not a lockdown: protected operations are denied
+                // (the policy only allows Valid) and TryActivate is the path forward.
+                _state = LicenseState.ActivationRequired;
+                _currentLicense = null;
+                PublishSnapshot();
+                _eventSink.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, result));
                 return result;
             }
 

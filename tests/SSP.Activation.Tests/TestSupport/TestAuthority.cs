@@ -27,6 +27,34 @@ internal sealed class TestAuthority : IDisposable
     /// <summary>Issues a signed artifact for the payload (authority-side operation).</summary>
     public string Issue(LicensePayload payload) => LicenseIssuer.EncodeLicenseArtifact(payload, _signingKey);
 
+    /// <summary>Creates a fresh ephemeral per-license (leaf) RSA key pair for the certified flow.</summary>
+    public static RSA CreateLeafKey(int keySizeBits = 2048) => RSA.Create(keySizeBits);
+
+    /// <summary>
+    /// Builds a key certification binding the payload identity to the leaf key, signed by
+    /// this (root) authority. Activation material is optional.
+    /// </summary>
+    public LicenseKeyCertification Certify(
+        LicensePayload payload,
+        RSA leafKey,
+        string? activationOtt = null,
+        string? activationCodeHash = null)
+        => new()
+        {
+            LicenseId = payload.LicenseId,
+            ProductId = payload.ProductId,
+            CustomerId = payload.CustomerId,
+            NotBefore = payload.IssuedAt,
+            ExpiresAt = payload.ExpiresAt,
+            PublicKeySpkiDer = leafKey.ExportSubjectPublicKeyInfo(),
+            ActivationOtt = activationOtt,
+            ActivationCodeHash = activationCodeHash
+        };
+
+    /// <summary>Issues a version-2 certified artifact (root certifies the leaf key; leaf signs the payload).</summary>
+    public string IssueCertified(LicensePayload payload, LicenseKeyCertification certification, RSA leafKey)
+        => LicenseCertificationIssuer.EncodeCertifiedLicenseArtifact(payload, certification, _signingKey, leafKey);
+
     /// <summary>Signs raw canonical bytes directly (used to prove canonicalization semantics).</summary>
     public byte[] SignCanonicalForTest(byte[] canonicalBytes)
         => _signingKey.SignData(canonicalBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);

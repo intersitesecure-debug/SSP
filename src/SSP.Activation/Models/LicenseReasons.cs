@@ -29,4 +29,25 @@ public static class LicenseReasons
     public const string RevocationCheckFailed = "revocation_check_failed";
     public const string StateStoreUnavailable = "state_store_unavailable";
     public const string InternalError = "internal_error";
+
+    /// <summary>The license is valid but requires activation (10-digit code) before it can authorize anything.</summary>
+    public const string ActivationRequired = "activation_required";
+
+    /// <summary>The activation code entered did not match the signed verification data for this license.</summary>
+    public const string InvalidActivationCode = "invalid_activation_code";
+
+    /// <summary>The root signature over the per-license key certification did not verify.</summary>
+    public const string InvalidCertificationSignature = "invalid_certification_signature";
+
+    /// <summary>The certified per-license public key is not a usable RSA key.</summary>
+    public const string InvalidCertificationKey = "invalid_certification_key";
+
+    /// <summary>The certification does not match the license payload it is embedded with (LicenseId/ProductId/CustomerId).</summary>
+    public const string CertificationBindingMismatch = "certification_binding_mismatch";
+
+    /// <summary>The certification is not yet valid (its NotBefore is in the future).</summary>
+    public const string CertificationNotYetValid = "certification_not_yet_valid";
+
+    /// <summary>The certification has expired (its ExpiresAt has passed).</summary>
+    public const string CertificationExpired = "certification_expired";
 }

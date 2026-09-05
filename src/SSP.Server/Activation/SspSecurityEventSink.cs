@@ -243,6 +243,8 @@ internal static class LicensingEventLogTaxonomy
         LicenseSecurityEventType.LicenseLockdownCleared => System.Diagnostics.EventLogEntryType.Information,
         LicenseSecurityEventType.LicenseSuperseded => System.Diagnostics.EventLogEntryType.Information,
         LicenseSecurityEventType.ProtectedOperationDenied => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.ActivationRequired => System.Diagnostics.EventLogEntryType.Information,
+        LicenseSecurityEventType.LicenseActivated => System.Diagnostics.EventLogEntryType.Information,
         _ => System.Diagnostics.EventLogEntryType.Warning,
     };
 }

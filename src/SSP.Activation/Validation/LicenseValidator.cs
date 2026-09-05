@@ -122,31 +122,171 @@ public sealed class LicenseValidator
                 artifact.ArtifactVersion);
         }
 
-        bool signatureValid;
+        var certification = artifact.Certification;
+        LicenseTrustAnchor? payloadSignerAnchor = _trustAnchor;
+
+        // The leaf anchor (when the certified chain is in use) lives only for this
+        // artifact's verification and is disposed on every path.
+        LicenseTrustAnchor? leafAnchor = null;
         try
         {
-            signatureValid = SignatureAlgorithms.Verify(artifact.SignatureAlgorithm, _trustAnchor, canonical, artifact.Signature);
-        }
-        catch (Exception ex)
-        {
-            return Fail(
-                LicenseState.InvalidSignature,
-                LicenseReasons.InvalidSignature,
-                $"Signature verification failed with a cryptographic error: {ex.GetType().Name}",
-                LicenseSecurityEventType.InvalidSignature,
-                payload,
-                artifact.ArtifactVersion);
-        }
+            if (certification is not null)
+            {
+                // Version-2 (certified) chain: root certifies the per-license key; that
+                // leaf key signs the payload. The root anchor is the only trust anchor; the
+                // key in the certification is usable only after the root signature verifies.
 
-        if (!signatureValid)
+                // 1a — the certification must be signed by the root authority. Nothing in
+                // the certification (including its embedded public key) is trusted before.
+                byte[] certificationCanonical;
+                try
+                {
+                    certificationCanonical = LicenseKeyCertificationCanonicalJson.Serialize(certification);
+                }
+                catch (Exception ex)
+                {
+                    return Fail(
+                        LicenseState.InvalidCertification,
+                        LicenseReasons.InvalidCertificationSignature,
+                        $"Key certification could not be canonicalized: {ex.GetType().Name}",
+                        LicenseSecurityEventType.InvalidSignature,
+                        payload,
+                        artifact.ArtifactVersion,
+                        certification: certification);
+                }
+
+                bool certificationValid;
+                try
+                {
+                    certificationValid = SignatureAlgorithms.Verify(
+                        artifact.SignatureAlgorithm, _trustAnchor, certificationCanonical, artifact.CertificationSignature!);
+                }
+                catch (Exception ex)
+                {
+                    return Fail(
+                        LicenseState.InvalidCertification,
+                        LicenseReasons.InvalidCertificationSignature,
+                        $"Certification verification failed with a cryptographic error: {ex.GetType().Name}",
+                        LicenseSecurityEventType.InvalidSignature,
+                        payload,
+                        artifact.ArtifactVersion,
+                        certification: certification);
+                }
+
+                if (!certificationValid)
+                {
+                    return Fail(
+                        LicenseState.InvalidCertification,
+                        LicenseReasons.InvalidCertificationSignature,
+                        "Key certification signature does not verify against the licensing authority public key.",
+                        LicenseSecurityEventType.InvalidSignature,
+                        payload,
+                        artifact.ArtifactVersion,
+                        certification: certification);
+                }
+
+                // 1b — the certified key becomes the payload-signer anchor. It is not a
+                // trust anchor by itself: it is only used because the root authority
+                // certified it.
+                try
+                {
+                    leafAnchor = LicenseTrustAnchor.FromSpkiDer(certification.PublicKeySpkiDer);
+                }
+                catch (Exception ex)
+                {
+                    return Fail(
+                        LicenseState.InvalidCertification,
+                        LicenseReasons.InvalidCertificationKey,
+                        $"The certified per-license public key is unusable: {ex.GetType().Name}",
+                        LicenseSecurityEventType.InvalidSignature,
+                        payload,
+                        artifact.ArtifactVersion,
+                        certification: certification);
+                }
+
+                payloadSignerAnchor = leafAnchor;
+
+                // 1c — binding: the certification must be about exactly this payload. This
+                // is what stops a certification for license A from authenticating a payload
+                // for license B, and stops a substituted payload from riding a valid
+                // certification.
+                if (certification.LicenseId != payload.LicenseId ||
+                    certification.ProductId != payload.ProductId ||
+                    certification.CustomerId != payload.CustomerId)
+                {
+                    return Fail(
+                        LicenseState.InvalidCertification,
+                        LicenseReasons.CertificationBindingMismatch,
+                        "Key certification does not match the license payload it is embedded with.",
+                        LicenseSecurityEventType.InvalidSignature,
+                        payload,
+                        artifact.ArtifactVersion,
+                        certification: certification);
+                }
+
+                // 1d — certification time window (the period the leaf key may sign). Checked
+                // here so an expired certification cannot authenticate any payload, however
+                // current the payload's own window is.
+                var now = _clock.UtcNow;
+                if (now < certification.NotBefore)
+                {
+                    return Fail(
+                        LicenseState.NotYetValid,
+                        LicenseReasons.CertificationNotYetValid,
+                        $"Key certification is not valid before {FormatTime(certification.NotBefore)} (now {FormatTime(now)}).",
+                        LicenseSecurityEventType.LicenseValidationFailed,
+                        payload,
+                        artifact.ArtifactVersion,
+                        certification: certification);
+                }
+
+                if (now >= certification.ExpiresAt)
+                {
+                    return Fail(
+                        LicenseState.Expired,
+                        LicenseReasons.CertificationExpired,
+                        $"Key certification expired at {FormatTime(certification.ExpiresAt)} (now {FormatTime(now)}).",
+                        LicenseSecurityEventType.LicenseExpired,
+                        payload,
+                        artifact.ArtifactVersion,
+                        certification: certification);
+                }
+            }
+
+            bool signatureValid;
+            try
+            {
+                signatureValid = SignatureAlgorithms.Verify(artifact.SignatureAlgorithm, payloadSignerAnchor!, canonical, artifact.Signature);
+            }
+            catch (Exception ex)
+            {
+                return Fail(
+                    LicenseState.InvalidSignature,
+                    LicenseReasons.InvalidSignature,
+                    $"Signature verification failed with a cryptographic error: {ex.GetType().Name}",
+                    LicenseSecurityEventType.InvalidSignature,
+                    payload,
+                    artifact.ArtifactVersion,
+                    certification: certification);
+            }
+
+            if (!signatureValid)
+            {
+                return Fail(
+                    LicenseState.InvalidSignature,
+                    LicenseReasons.InvalidSignature,
+                    certification is null
+                        ? "License signature does not verify against the licensing authority public key."
+                        : "License signature does not verify against the certified per-license public key.",
+                    LicenseSecurityEventType.InvalidSignature,
+                    payload,
+                    artifact.ArtifactVersion,
+                    certification: certification);
+            }
+        }
+        finally
         {
-            return Fail(
-                LicenseState.InvalidSignature,
-                LicenseReasons.InvalidSignature,
-                "License signature does not verify against the licensing authority public key.",
-                LicenseSecurityEventType.InvalidSignature,
-                payload,
-                artifact.ArtifactVersion);
+            leafAnchor?.Dispose();
         }
 
         // Stage 2 — revocation / status (payload is now authenticated).
@@ -293,14 +433,33 @@ public sealed class LicenseValidator
                 $"License sequence {payload.SequenceNumber} is older than the highest accepted sequence {stored.HighestAcceptedSequenceNumber}.",
                 LicenseSecurityEventType.LicenseSuperseded,
                 payload,
-                artifact.ArtifactVersion);
+                artifact.ArtifactVersion,
+                certification: certification);
+        }
+
+        // Stage 7 — activation state (version-2 certified licenses only). A license whose
+        // certification carries an activation-code hash must have been activated for THIS
+        // license id before it can be Valid. Activation state can only restrict (an
+        // activation-required license stays ActivationRequired); it can never grant.
+        if (certification is { RequiresActivation: true } &&
+            stored?.ActivatedLicenseId != payload.LicenseId)
+        {
+            return Fail(
+                LicenseState.ActivationRequired,
+                LicenseReasons.ActivationRequired,
+                "License is valid but requires activation. Enter the 10-digit activation code issued by the Licensing Authority.",
+                LicenseSecurityEventType.ActivationRequired,
+                payload,
+                artifact.ArtifactVersion,
+                certification: certification);
         }
 
         var license = new License
         {
             Payload = payload,
             SignatureAlgorithm = artifact.SignatureAlgorithm,
-            ArtifactVersion = artifact.ArtifactVersion
+            ArtifactVersion = artifact.ArtifactVersion,
+            Certification = certification
         };
 
         var validEvent = MakeEvent(
@@ -341,7 +500,8 @@ public sealed class LicenseValidator
         LicenseSecurityEventType eventType,
         LicensePayload? payload = null,
         int artifactVersion = LicenseArtifactCodec.CurrentArtifactVersion,
-        string signatureAlgorithm = SignatureAlgorithms.RsaPssSha256)
+        string signatureAlgorithm = SignatureAlgorithms.RsaPssSha256,
+        LicenseKeyCertification? certification = null)
     {
         License? license = null;
         if (payload is not null)
@@ -350,7 +510,8 @@ public sealed class LicenseValidator
             {
                 Payload = payload,
                 SignatureAlgorithm = signatureAlgorithm,
-                ArtifactVersion = artifactVersion
+                ArtifactVersion = artifactVersion,
+                Certification = certification
             };
         }
 

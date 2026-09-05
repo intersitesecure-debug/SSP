@@ -41,6 +41,42 @@ internal static class ArtifactTestHelper
         return DecodeBase64Url(node["signature"]!.GetValue<string>());
     }
 
+    /// <summary>Extracts the decoded canonical certification JSON from a version-2 artifact.</summary>
+    public static string GetCertificationJson(string artifactJson)
+    {
+        var node = JsonNode.Parse(artifactJson)!.AsObject();
+        var certificationBase64 = node["keyCertification"]!.GetValue<string>();
+        return Encoding.UTF8.GetString(DecodeBase64Url(certificationBase64));
+    }
+
+    /// <summary>Extracts the root certification-signature bytes from a version-2 artifact.</summary>
+    public static byte[] GetCertificationSignatureBytes(string artifactJson)
+    {
+        var node = JsonNode.Parse(artifactJson)!.AsObject();
+        return DecodeBase64Url(node["keyCertificationSignature"]!.GetValue<string>());
+    }
+
+    /// <summary>Builds a version-2 certified artifact envelope from raw payload/certification JSON and signature bytes.</summary>
+    public static string MakeCertifiedArtifact(
+        string payloadJson,
+        byte[] payloadSignature,
+        string certificationJson,
+        byte[] certificationSignature,
+        string signatureAlgorithm = "RSA-PSS-SHA256")
+    {
+        var obj = new JsonObject
+        {
+            ["format"] = "ssp-license",
+            ["artifactVersion"] = 2,
+            ["signatureAlgorithm"] = signatureAlgorithm,
+            ["keyCertification"] = EncodeBase64Url(Encoding.UTF8.GetBytes(certificationJson)),
+            ["keyCertificationSignature"] = EncodeBase64Url(certificationSignature),
+            ["payload"] = EncodeBase64Url(Encoding.UTF8.GetBytes(payloadJson)),
+            ["signature"] = EncodeBase64Url(payloadSignature)
+        };
+        return obj.ToJsonString();
+    }
+
     /// <summary>Builds an artifact envelope from a raw payload JSON string and signature bytes.</summary>
     public static string MakeArtifact(string payloadJson, byte[] signature, string signatureAlgorithm = "RSA-PSS-SHA256", int artifactVersion = 1)
     {

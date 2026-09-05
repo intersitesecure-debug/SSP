@@ -22,6 +22,8 @@ internal sealed class LicenseIssueRequest
     public string ProductName { get; init; } = AuthorityProduct.ProductName;
     public Guid CustomerId { get; init; }
     public string CustomerName { get; init; } = string.Empty;
+    public string? OrganizationOrPersonName { get; init; }
+    public string? ComputerName { get; init; }
     public string Edition { get; init; } = string.Empty;
     public string LicenseVersion { get; init; } = "1.0";
     public DateTimeOffset IssuedAt { get; init; }
@@ -42,6 +44,8 @@ internal sealed class LicenseIssueSpecDocument
     public string? ProductName { get; set; }
     public Guid? CustomerId { get; set; }
     public string? CustomerName { get; set; }
+    public string? OrganizationName { get; set; }
+    public string? ComputerName { get; set; }
     public string? Edition { get; set; }
     public string? LicenseVersion { get; set; }
     public string? IssuedAt { get; set; }
@@ -62,6 +66,8 @@ internal static class LicenseIssuance
     // artifact the relying party cannot decode.
     public const int MaxProductName = 200;
     public const int MaxCustomerName = 200;
+    public const int MaxOrganizationOrPersonName = 200;
+    public const int MaxComputerName = 64;
     public const int MaxEdition = 64;
     public const int MaxLicenseVersion = 32;
     public const int MaxInstallationId = 128;
@@ -192,6 +198,16 @@ internal static class LicenseIssuance
             throw new AuthorityToolException($"installationId exceeds {MaxInstallationId} characters.");
         }
 
+        if (!string.IsNullOrEmpty(request.OrganizationOrPersonName) && request.OrganizationOrPersonName.Length > MaxOrganizationOrPersonName)
+        {
+            throw new AuthorityToolException($"organizationName exceeds {MaxOrganizationOrPersonName} characters.");
+        }
+
+        if (!string.IsNullOrEmpty(request.ComputerName) && request.ComputerName.Length > MaxComputerName)
+        {
+            throw new AuthorityToolException($"computerName exceeds {MaxComputerName} characters.");
+        }
+
         if (request.IssuedAt > request.NotBefore)
         {
             throw new AuthorityToolException("issuedAt must not be after notBefore.");
@@ -234,6 +250,8 @@ internal static class LicenseIssuance
             ProductName = request.ProductName,
             CustomerId = request.CustomerId,
             CustomerName = request.CustomerName,
+            OrganizationOrPersonName = string.IsNullOrWhiteSpace(request.OrganizationOrPersonName) ? null : request.OrganizationOrPersonName,
+            ComputerName = string.IsNullOrWhiteSpace(request.ComputerName) ? null : request.ComputerName,
             Edition = request.Edition,
             LicenseVersion = request.LicenseVersion,
             IssuedAt = request.IssuedAt,
@@ -417,6 +435,8 @@ internal static class LicenseIssuance
         builder.AppendLine($"  ProductName         : {payload.ProductName}");
         builder.AppendLine($"  CustomerId          : {payload.CustomerId:D}");
         builder.AppendLine($"  CustomerName        : {payload.CustomerName}");
+        builder.AppendLine($"  Organization        : {payload.OrganizationOrPersonName ?? "(not set)"}");
+        builder.AppendLine($"  Computer            : {payload.ComputerName ?? "(not set)"}");
         builder.AppendLine($"  Edition             : {payload.Edition}");
         builder.AppendLine($"  LicenseVersion      : {payload.LicenseVersion}");
         builder.AppendLine($"  IssuedAt            : {FormatTime(payload.IssuedAt)}");

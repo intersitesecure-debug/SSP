@@ -256,6 +256,19 @@ internal static class AuthorityKeyMaterial
     public static void WriteArtifactFile(string path, string artifactJson, bool overwrite)
         => WriteFileAtomic(path, artifactJson, overwrite);
 
+    /// <summary>Read a text file (activation request / activation record), failing closed on any error.</summary>
+    public static string ReadTextFile(string path, string what)
+        => ReadPemFile(path, what);
+
+    /// <summary>
+    /// Write a text file atomically (authority-side activation record). Refuses to
+    /// overwrite unless <paramref name="overwrite"/> is set. The activation record holds
+    /// the plaintext activation code and must be treated like the authority private key:
+    /// kept outside the repository, outside the build and outside every customer artifact.
+    /// </summary>
+    public static void WriteTextFile(string path, string content, bool overwrite)
+        => WriteFileAtomic(path, content, overwrite);
+
     public static void AssertAuthorityRsa(RSA rsa, bool requirePrivate, string source)
     {
         ArgumentNullException.ThrowIfNull(rsa);

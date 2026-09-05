@@ -43,6 +43,8 @@ public class SspSecurityEventSinkTaxonomyTests
                 LicenseSecurityEventType.LicenseLockdownCleared => EventLogEntryType.Information,
                 LicenseSecurityEventType.LicenseSuperseded => EventLogEntryType.Information,
                 LicenseSecurityEventType.ProtectedOperationDenied => EventLogEntryType.Warning,
+                LicenseSecurityEventType.ActivationRequired => EventLogEntryType.Information,
+                LicenseSecurityEventType.LicenseActivated => EventLogEntryType.Information,
                 _ => throw new Xunit.Sdk.XunitException($"No reviewed severity for {eventType}"),
             };
 
@@ -58,6 +60,8 @@ public class SspSecurityEventSinkTaxonomyTests
         Assert.Equal(EventLogEntryType.Information, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseValidated));
         Assert.Equal(EventLogEntryType.Information, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseLockdownCleared));
         Assert.Equal(EventLogEntryType.Information, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseSuperseded));
+        Assert.Equal(EventLogEntryType.Information, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.ActivationRequired));
+        Assert.Equal(EventLogEntryType.Information, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseActivated));
 
         // Warning: every denial / operator-actionable failure state.
         Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseValidationFailed));
@@ -106,7 +110,7 @@ public class SspSecurityEventSinkTaxonomyTests
         // type this assertion fails (and so does the exhaustive switch in the
         // sink), which is exactly the signal that the taxonomy needs review.
         var expected = Enum.GetValues<LicenseSecurityEventType>();
-        Assert.Equal(11, expected.Length);
+        Assert.Equal(13, expected.Length);
 
         Assert.Contains(LicenseSecurityEventType.LicenseLoaded, expected);
         Assert.Contains(LicenseSecurityEventType.LicenseValidated, expected);
@@ -119,5 +123,7 @@ public class SspSecurityEventSinkTaxonomyTests
         Assert.Contains(LicenseSecurityEventType.LicenseLockdownCleared, expected);
         Assert.Contains(LicenseSecurityEventType.LicenseSuperseded, expected);
         Assert.Contains(LicenseSecurityEventType.ProtectedOperationDenied, expected);
+        Assert.Contains(LicenseSecurityEventType.ActivationRequired, expected);
+        Assert.Contains(LicenseSecurityEventType.LicenseActivated, expected);
     }
 }

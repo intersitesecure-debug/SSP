@@ -13,9 +13,9 @@ namespace SSP.Activation;
 /// Canonical form (artifact version 1):
 ///   - UTF-8, no BOM, no whitespace between tokens.
 ///   - JSON object keys appear in fixed lexicographic (ordinal) order:
-///     customerId, customerName, edition, expiresAt, featureSet, [installationId],
-///     issuedAt, licenseId, licenseVersion, limits, notBefore, productId, productName,
-///     sequenceNumber, status.
+///     [computerName], customerId, customerName, edition, expiresAt, featureSet,
+///     [installationId], issuedAt, licenseId, licenseVersion, limits, notBefore,
+///     [organizationName], productId, productName, sequenceNumber, status.
 ///   - GUIDs: lowercase hyphenated "D" form.
 ///   - Timestamps: RFC 3339 UTC with fixed format yyyy-MM-ddTHH:mm:ss.fffffffZ (exactly
 ///     seven fractional digits). Non-UTC offsets are converted to UTC first, so the
@@ -27,8 +27,9 @@ namespace SSP.Activation;
 ///     ordinally — a set, not an ordered list.
 ///   - limits: JSON object with normalized, ordinally sorted keys; an explicit null value
 ///     means "unlimited" for that limit and is preserved.
-///   - Optional members that are not set (installationId) are omitted; null appears only
-///     for explicitly unlimited limits.
+///   - Optional members that are not set (installationId, computerName,
+///     organizationName) are omitted; null appears only for explicitly
+///     unlimited limits.
 /// </summary>
 public static class LicenseCanonicalJson
 {
@@ -50,6 +51,12 @@ public static class LicenseCanonicalJson
         using var writer = new Utf8JsonWriter(buffer, WriterOptions);
 
         writer.WriteStartObject();
+
+        if (!string.IsNullOrEmpty(payload.ComputerName))
+        {
+            writer.WritePropertyName("computerName");
+            writer.WriteStringValue(payload.ComputerName);
+        }
 
         writer.WritePropertyName("customerId");
         writer.WriteStringValue(payload.CustomerId.ToString("D"));
@@ -103,6 +110,12 @@ public static class LicenseCanonicalJson
         writer.WriteEndObject();
 
         WriteTimestamp(writer, "notBefore", payload.NotBefore);
+
+        if (!string.IsNullOrEmpty(payload.OrganizationOrPersonName))
+        {
+            writer.WritePropertyName("organizationName");
+            writer.WriteStringValue(payload.OrganizationOrPersonName);
+        }
 
         writer.WritePropertyName("productId");
         writer.WriteStringValue(payload.ProductId.ToString("D"));

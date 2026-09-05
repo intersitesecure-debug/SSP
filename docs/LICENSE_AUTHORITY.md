@@ -6,9 +6,18 @@ holds **no key material of its own**: the Licensing Authority private key is
 supplied on every invocation as a file that must live **outside** this
 repository, outside the SSP build, and outside every shipped artifact.
 
-Issuance uses the existing `SSP.Activation.LicenseIssuer` and the existing
-`ssp-license` v1 / `RSA-PSS-SHA256` payload. This tool does not invent a
-second license format.
+Issuance uses the `SSP.Activation` issuing API over the `ssp-license`
+format / `RSA-PSS-SHA256`:
+
+* `issue` produces the legacy **v1** envelope (the root authority signs the
+  payload directly) via `LicenseIssuer`.
+* `issue-certified` produces the **v2** envelope (the root authority certifies
+  a fresh per-license key; that leaf key signs the payload) via
+  `LicenseCertificationIssuer`, optionally carrying the activation OTT and the
+  SHA-256 of a 10-digit activation code.
+
+Both formats are part of one `ssp-license` format family; the envelope
+version is `artifactVersion` (see `docs/LICENSE_ACTIVATION_ARCHITECTURE.md`).
 
 Companion: `TRUST_ANCHOR_KEY_CEREMONY.md` (how the *public* half is compiled
 into a release binary). This document is how the *private* half is used to
@@ -23,10 +32,12 @@ issue licenses.
 | `keygen` | Generate a production **RSA-3072** authority key pair. Writes the private key only to `--private-key`. Writes the public key **only** if `--public-key` is passed. | writes it |
 | `export-public` | Export the SPKI `BEGIN PUBLIC KEY` PEM from a private key file. | reads it |
 | `fingerprint` | Print (and optionally `--expect`) the SPKI SHA-256 of the public key. Same algorithm as `SSP.Server --trust-anchor-info`. | optional (public half) |
-| `issue` | Sign a `LicensePayload` with `LicenseIssuer.EncodeLicenseArtifact`. | reads it |
+| `issue` | Sign a `LicensePayload` with `LicenseIssuer.EncodeLicenseArtifact` (v1). | reads it |
+| `issue-certified` | Sign a v2 artifact: root certifies a fresh per-license key, that key signs the payload; optional `--activation-required` adds the activation OTT + 10-digit code and writes an activation record. | reads it |
 | `renew` | Re-issue an existing artifact with a **higher** `sequenceNumber` (renewal or signed revocation). Verifies the original signature first. | reads it |
 | `inspect` | Decode and print payload fields. Does **not** verify the signature and never prints signature bytes. | no |
 | `verify` | Run the existing `LicenseValidator` pipeline against `--public-key`. Exit 0 iff `Valid`. | no |
+| `activate` | Match a customer activation request's OTT against an activation record (single use) and print the 10-digit code. | no |
 
 The tool never:
 
@@ -78,7 +89,13 @@ Required payload fields are exactly those of `LicensePayload`:
 
 `licenseId`, `productId`, `productName`, `customerId`, `customerName`,
 `edition`, `licenseVersion`, `issuedAt`, `notBefore`, `expiresAt`,
-`installationId?`, `featureSet`, `limits`, `status`, `sequenceNumber`.
+`installationId?`, `organizationName?`, `computerName?`, `featureSet`,
+`limits`, `status`, `sequenceNumber`.
+
+`--organization-name` and `--computer-name` are optional signature-covered
+identity fields (administrative binding, shown in `SSP.Server --license-status`
+and in the activation request). They never replace `--installation-id`, which
+remains the cryptographic installation binding.
 
 ```powershell
 dotnet run --project tools/SSP.LicenseAuthority -- issue `
@@ -145,6 +162,67 @@ dotnet run --project tools/SSP.LicenseAuthority -- renew `
 `renew` will not re-sign an artifact whose signature does not verify against
 `--private-key`. That closes the failure mode of minting a real authority
 signature over a tampered payload.
+
+---
+
+## 4a. Activation-required issuance and offline activation
+
+Issue a **v2** license that requires activation. The command generates a fresh
+per-license key, a random activation OTT and a 10-digit activation code, writes
+the signed license, and writes an activation record (authority secret):
+
+```powershell
+dotnet run --project tools/SSP.LicenseAuthority -- issue-certified `
+    --private-key  D:\ceremony\ssp-authority-private.pem `
+    --output       D:\outbox\contoso-rdp.json `
+    --customer-id 11111111-1111-1111-1111-111111111111 `
+    --customer-name "Contoso Ltd." `
+    --edition Enterprise `
+    --installation-id <id from SSP.Server --license-status> `
+    --organization-name "Contoso R&D" `
+    --computer-name TUNNEL-01 `
+    --feature rdp --feature ssh `
+    --limit max_services=3 `
+    --activation-required `
+    --activation-record D:\ceremony\activation-records\<licenseId>.json `
+    --not-before 2026-01-01T00:00:00Z `
+    --expires-at 2027-01-01T00:00:00Z
+```
+
+* The activation **code** is printed once and is **not** written into the
+  license: only its SHA-256 (`activationCodeHash`) and the OTT are signed into
+  the key certification. The leaf private key is generated, used, and discarded
+  in-process — it is never persisted and never appears in any file.
+* The **activation record** (`--activation-record`) contains the OTT and the
+  plaintext code. It is authority secret material and must be kept with the
+  authority private key: outside the repository, the build, CI and every
+  customer artifact.
+* Omit `--activation-required` for a pre-activated v2 license (no activation
+  step needed on the customer machine).
+
+When the customer's SSP.Server reports `ActivationRequired`, the customer
+produces a request file and the authority answers with the code:
+
+```powershell
+# Customer machine:
+SSP.Server.exe --install-license D:\inbox\contoso-rdp.json
+SSP.Server.exe --create-activation-request     # writes activation-request.json
+# ...send activation-request.json to the authority out-of-band...
+
+# Authority host:
+dotnet run --project tools/SSP.LicenseAuthority -- activate `
+    --request D:\inbox\activation-request.json `
+    --activation-record D:\ceremony\activation-records\<licenseId>.json
+# prints the 10-digit code; the OTT is consumed (single use)
+
+# Customer machine:
+SSP.Server.exe --activate <code>               # transitions to Valid
+```
+
+`activate` refuses a request whose OTT does not match the record, whose
+license id does not match, or whose record was already consumed. The OTT is
+consumed only after a successful match, so a rejected attempt leaves the record
+usable.
 
 ---
 

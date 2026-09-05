@@ -53,8 +53,23 @@ public sealed class LicensedTestOptions
     public DateTimeOffset? IssuedAt { get; set; }
     public Guid? ProductId { get; set; }
     public string? InstallationId { get; set; }
+    public string? OrganizationOrPersonName { get; set; }
+    public string? ComputerName { get; set; }
     public LicenseStatus Status { get; set; } = LicenseStatus.Active;
     public long SequenceNumber { get; set; } = 1;
+
+    /// <summary>Issue a version-2 (certified) artifact instead of the legacy root-signed one.</summary>
+    public bool Certified { get; set; }
+
+    /// <summary>The certified license requires activation (carries an OTT + code hash).</summary>
+    public bool ActivationRequired { get; set; }
+
+    /// <summary>
+    /// The activation code to sign into the certification. When null and
+    /// <see cref="ActivationRequired"/> is true, a random code is generated and exposed via
+    /// <see cref="LicensedTestEnvironment.IssuedActivationCode"/>.
+    /// </summary>
+    public string? ActivationCode { get; set; }
 
     /// <summary>
     /// When true the artifact is signed by an UNRELATED authority key, so it
@@ -133,6 +148,12 @@ public sealed class LicensedTestEnvironment : IDisposable
     public string LicenseFilePath => Paths.LicenseFilePath;
     public string StateStorePath => Paths.StateStorePath;
 
+    /// <summary>The activation code the environment signed into the license (when activation-required).</summary>
+    public string? IssuedActivationCode { get; private set; }
+
+    /// <summary>The activation OTT the environment signed into the license (when activation-required).</summary>
+    public string? IssuedActivationOtt { get; private set; }
+
     /// <summary>The license payload this environment issues by default.</summary>
     public LicensePayload DefaultPayload => BuildPayload(Options);
 
@@ -194,6 +215,10 @@ public sealed class LicensedTestEnvironment : IDisposable
             else if (opts.CorruptArtifact)
             {
                 env.WriteCorruptedLicense(env.DefaultPayload);
+            }
+            else if (opts.Certified)
+            {
+                env.WriteCertifiedLicense(env.DefaultPayload, opts.ActivationRequired, opts.ActivationCode);
             }
             else
             {
@@ -263,6 +288,8 @@ public sealed class LicensedTestEnvironment : IDisposable
             ProductName = SspLicensing.ProductName,
             CustomerId = Guid.NewGuid(),
             CustomerName = "Integration Test Customer",
+            OrganizationOrPersonName = opts.OrganizationOrPersonName,
+            ComputerName = opts.ComputerName,
             Edition = "Enterprise",
             LicenseVersion = "1.0",
             IssuedAt = opts.IssuedAt ?? now.AddDays(-30),
@@ -278,6 +305,45 @@ public sealed class LicensedTestEnvironment : IDisposable
 
     /// <summary>Issues and writes an artifact signed by THIS environment's authority.</summary>
     public void WriteLicense(LicensePayload payload) => WriteSigned(payload, _authority, corrupt: false);
+
+    /// <summary>
+    /// Issues and writes a version-2 certified artifact: the environment authority certifies
+    /// a fresh leaf key, and the leaf key signs the payload. When
+    /// <paramref name="activationRequired"/> is true, the certification also carries an OTT
+    /// and the SHA-256 of <paramref name="activationCode"/> (or of a freshly generated code,
+    /// exposed via <see cref="IssuedActivationCode"/>).
+    /// </summary>
+    public void WriteCertifiedLicense(LicensePayload payload, bool activationRequired, string? activationCode)
+    {
+        using var leaf = RSA.Create(2048);
+
+        string? ott = null;
+        string? codeHash = null;
+        if (activationRequired)
+        {
+            ott = LicenseActivation.GenerateActivationOtt();
+            var code = activationCode ?? LicenseActivation.GenerateActivationCode();
+            codeHash = LicenseActivation.ComputeActivationCodeHash(code);
+            IssuedActivationCode = code;
+            IssuedActivationOtt = ott;
+        }
+
+        var certification = new LicenseKeyCertification
+        {
+            LicenseId = payload.LicenseId,
+            ProductId = payload.ProductId,
+            CustomerId = payload.CustomerId,
+            NotBefore = payload.IssuedAt,
+            ExpiresAt = payload.ExpiresAt,
+            PublicKeySpkiDer = leaf.ExportSubjectPublicKeyInfo(),
+            ActivationOtt = ott,
+            ActivationCodeHash = codeHash
+        };
+
+        var artifact = LicenseCertificationIssuer.EncodeCertifiedLicenseArtifact(payload, certification, _authority, leaf);
+        Directory.CreateDirectory(LicenseDirectory);
+        File.WriteAllText(LicenseFilePath, artifact);
+    }
 
     /// <summary>Writes an artifact signed by an unrelated key (signature must not verify).</summary>
     public void WriteLicenseSignedByForeignAuthority(LicensePayload payload)
