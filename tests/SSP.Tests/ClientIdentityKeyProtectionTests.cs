@@ -394,21 +394,36 @@ public class ClientIdentityKeyProtectionTests
     // ────────────────────────────────────────────────────────────────
 
     private static void AssertCurrentUserScope(string path, string what)
-    {
-        var bytes = File.ReadAllBytes(path);
-        Assert.True(ProtectedFileStore.HasEncryptedEnvelope(bytes),
-            $"{what} at {path} is not in the encrypted-at-rest envelope.");
-        Assert.Equal(DataProtectionScope.CurrentUser, ProtectedFileStore.GetEnvelopeScope(bytes),
-            $"{what} at {path} must be protected with CurrentUser scope.");
-    }
+        => AssertEnvelopeScope(DataProtectionScope.CurrentUser, path, what);
 
     private static void AssertLocalMachineScope(string path, string what)
+        => AssertEnvelopeScope(DataProtectionScope.LocalMachine, path, what);
+
+    /// <summary>
+    /// Asserts the scope RECORDED IN THE ENVELOPE of <paramref name="path"/>.
+    ///
+    /// The pinned xUnit in this repository (xunit 2.5.3, see BUILD.md §2 and
+    /// its "do not bump these versions on an offline machine" rule) has no
+    /// <c>Assert.Equal</c> overload that takes a user message: the third
+    /// argument is a COMPARER (<c>IEqualityComparer&lt;T&gt;</c> or
+    /// <c>Func&lt;T, T, bool&gt;</c>), which is exactly why
+    /// <c>Assert.Equal(expected, actual, $"...")</c> failed to bind with
+    /// CS1503 (cannot convert from 'string' to
+    /// 'Func&lt;DataProtectionScope?, DataProtectionScope?, bool&gt;').
+    /// Passing the message through <c>Assert.True</c> instead keeps the
+    /// diagnostic value: a mismatch still names the file, what it holds, the
+    /// required scope and the scope the envelope actually carries.
+    /// </summary>
+    private static void AssertEnvelopeScope(DataProtectionScope expected, string path, string what)
     {
         var bytes = File.ReadAllBytes(path);
         Assert.True(ProtectedFileStore.HasEncryptedEnvelope(bytes),
             $"{what} at {path} is not in the encrypted-at-rest envelope.");
-        Assert.Equal(DataProtectionScope.LocalMachine, ProtectedFileStore.GetEnvelopeScope(bytes),
-            $"{what} at {path} must be protected with LocalMachine scope.");
+
+        var actual = ProtectedFileStore.GetEnvelopeScope(bytes);
+        var recorded = actual is { } scope ? scope.ToString() : "no scope";
+        Assert.True(actual == expected,
+            $"{what} at {path} must be protected with {expected} scope (envelope records {recorded}).");
     }
 
     private static void AssertEncryptedAtRest(string path, params string[] plaintextMarkers)
@@ -463,10 +478,16 @@ public class ClientIdentityKeyProtectionTests
         tag.CopyTo(payload, 12);
         ciphertext.CopyTo(payload, 28);
 
-        var envelope = new byte[9 + payload.Length];
-        "SSP-EAR1"u8.CopyTo(envelope, 0);
-        envelope[8] = 2; // non-Windows AES-GCM algorithm byte
-        payload.CopyTo(envelope, 9);
+        // Envelope layout of ProtectedFileStore: magic | algorithm byte |
+        // payload. "SSP-EAR1"u8 is a ReadOnlySpan<byte>, whose CopyTo takes
+        // the destination span only (no start offset), so the magic is
+        // written into the leading slice - the same shape as
+        // ProtectedFileStore.BuildEnvelope, which copies a byte[].
+        var magic = "SSP-EAR1"u8;
+        var envelope = new byte[magic.Length + 1 + payload.Length];
+        magic.CopyTo(envelope.AsSpan(0, magic.Length));
+        envelope[magic.Length] = 2; // non-Windows AES-GCM algorithm byte
+        payload.CopyTo(envelope, magic.Length + 1);
         return envelope;
     }
 

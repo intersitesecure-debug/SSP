@@ -243,19 +243,41 @@ public static class ProtectedFileStore
             return WriteTextAsync(path, read.Text, scope, ct);
 
         if (read.WasEncrypted && read.EnvelopeScope is { } envelopeScope && envelopeScope != scope)
-        {
-            try
-            {
-                return WriteTextAsync(path, read.Text, scope, ct);
-            }
-            catch
-            {
-                // Best effort only (see remarks); the validated content is
-                // already available to the caller in memory.
-            }
-        }
+            return TryRewrapEnvelopeAsync(path, read.Text, scope, ct);
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// The best-effort re-wrap of remark 2. It has to be an <c>async</c>
+    /// method rather than a <c>try { return WriteTextAsync(...); } catch</c>
+    /// block: a try around a RETURNED Task only sees synchronous throws, so
+    /// every asynchronous failure of the write path (an I/O error from
+    /// AtomicFile, a file still held open by an antivirus scanner, a DPAPI
+    /// failure) escaped into the awaiting caller and turned an already
+    /// successful read into a failed one - exactly what remark 2 forbids.
+    /// Cancellation requested through <paramref name="ct"/> is the one thing
+    /// that must still propagate, because that is the caller's own decision
+    /// and not a write failure.
+    /// </summary>
+    private static async Task TryRewrapEnvelopeAsync(
+        string path, string text, DataProtectionScope scope, CancellationToken ct)
+    {
+        try
+        {
+            await WriteTextAsync(path, text, scope, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Best effort only (see the remarks on MigratePlaintextAsync);
+            // the validated content is already available to the caller in
+            // memory and the next successful write lands in the requested
+            // scope anyway.
+        }
     }
 
     private static string DecodeUtf8Text(byte[] bytes)
