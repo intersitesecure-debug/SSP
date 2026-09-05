@@ -60,6 +60,12 @@ public sealed class ServiceConfig
     public int ActiveOneTimeTokenFailedAuthenticationCodeAttempts { get; set; }
 
     /// <summary>
+    /// ISO-8601 UTC instant before which another Authentication Code may not
+    /// be generated for the legacy active OTT. Server-side only.
+    /// </summary>
+    public string? ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc { get; set; }
+
+    /// <summary>
     /// Collection of pending One-Time Tokens for multi-client provisioning.
     /// Each entry stores the hash and the intended client name.
     /// Supports concurrent pending enrollments: Client02, Client03, etc.
@@ -98,6 +104,12 @@ public sealed class PendingOneTimeToken
     /// package.
     /// </summary>
     public int FailedAuthenticationCodeAttempts { get; set; }
+
+    /// <summary>
+    /// ISO-8601 UTC instant before which another Authentication Code may not
+    /// be generated for this OTT. Server-side only; never embedded in a client.
+    /// </summary>
+    public string? AuthenticationCodeRetryNotBeforeUtc { get; set; }
 }
 
 /// <summary>

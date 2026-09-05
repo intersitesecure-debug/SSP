@@ -275,6 +275,28 @@ public sealed class ServerProtocol : IDisposable
                 $"License does not permit enrolling another client ({clientDecision.ReasonCode}).");
         }
 
+        // Progressive cooldown (Phase 2): refuse to mint a new Authentication
+        // Code until the per-OTT retry instant has elapsed. Checked after the
+        // presenter has proven possession of this OTT and before any code is
+        // generated or displayed, so a hammering client cannot obtain fresh
+        // guesses and other pending OTTs are not delayed.
+        var retryNotBeforeUtc = matchedPending?.AuthenticationCodeRetryNotBeforeUtc
+            ?? (matchedLegacy ? config.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc : null);
+        if (!AuthenticationCodeAbusePolicy.IsRetryAllowed(retryNotBeforeUtc, DateTimeOffset.UtcNow))
+        {
+            var failedAttempts = matchedPending?.FailedAuthenticationCodeAttempts
+                ?? config.ActiveOneTimeTokenFailedAuthenticationCodeAttempts;
+            ReportEnrollmentSecurityEvent("Enrollment.AuthenticationCodeRateLimited", failedAttempts);
+
+            var rateLimited = new EnrollmentResultMessage
+            {
+                Success = false,
+                ErrorOrWait = "verification failed",
+            };
+            await MessageWire.WriteAsync(stream, rateLimited, ct).ConfigureAwait(false);
+            throw new UnauthorizedAccessException("AuthenticationCode retry is not yet allowed.");
+        }
+
         // Step 9: generate the AuthenticationCode. Per spec §12 / §16 the
         // One-Time Token hash is invalidated ONLY after the enrollment has
         // fully completed (Authentication Code validated + client stored),
@@ -390,12 +412,14 @@ public sealed class ServerProtocol : IDisposable
                 {
                     config.ActiveOneTimeTokenHash = null;
                     config.ActiveOneTimeTokenFailedAuthenticationCodeAttempts = 0;
+                    config.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc = null;
                 }
             }
             if (matchedLegacy)
             {
                 config.ActiveOneTimeTokenHash = null;
                 config.ActiveOneTimeTokenFailedAuthenticationCodeAttempts = 0;
+                config.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc = null;
                 // Also remove any pending entry that might have same hash (first client created with both fields)
                 if (!string.IsNullOrEmpty(presentedHash))
                 {
@@ -474,6 +498,16 @@ public sealed class ServerProtocol : IDisposable
                 return true;
             }
 
+            var retryAt = AuthenticationCodeAbusePolicy.NextRetryUtc(attempts, DateTimeOffset.UtcNow);
+            if (pending is not null)
+                pending.AuthenticationCodeRetryNotBeforeUtc = retryAt;
+            if (!string.IsNullOrEmpty(current.ActiveOneTimeTokenHash) &&
+                TokenGenerator.ConstantTimeEquals(current.ActiveOneTimeTokenHash, presentedHash))
+            {
+                current.ActiveOneTimeTokenFailedAuthenticationCodeAttempts = attempts;
+                current.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc = retryAt;
+            }
+
             var revoked = attempts >= MaximumAuthenticationCodeAttempts;
             if (revoked)
             {
@@ -485,6 +519,7 @@ public sealed class ServerProtocol : IDisposable
                 {
                     current.ActiveOneTimeTokenHash = null;
                     current.ActiveOneTimeTokenFailedAuthenticationCodeAttempts = 0;
+                    current.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc = null;
                 }
             }
 

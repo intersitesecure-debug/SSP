@@ -268,6 +268,34 @@ public class F3_CryptoTests
     }
 
     [Fact]
+    public void AuthenticationCode_RemainingDigitsIncludeZero_AndFirstDigitNeverZero()
+    {
+        var sawZeroAfterFirst = false;
+        for (var i = 0; i < 5_000; i++)
+        {
+            var code = TokenGenerator.GenerateAuthenticationCode();
+            Assert.Equal(10, code.Length);
+            Assert.InRange(code[0], '1', '9');
+            if (code.IndexOf('0', 1) >= 0)
+                sawZeroAfterFirst = true;
+        }
+
+        Assert.True(sawZeroAfterFirst,
+            "Unbiased generation must be able to produce 0 in digits 2-10.");
+    }
+
+    [Fact]
+    public void AuthenticationCode_FirstDigitCoversOneThroughNine()
+    {
+        var seen = new HashSet<char>();
+        for (var i = 0; i < 5_000 && seen.Count < 9; i++)
+            seen.Add(TokenGenerator.GenerateAuthenticationCode()[0]);
+
+        Assert.Equal(9, seen.Count);
+        Assert.DoesNotContain('0', seen);
+    }
+
+    [Fact]
     public void ConstantTimeEquals_HandlesEqualAndDifferent()
     {
         Assert.True(TokenGenerator.ConstantTimeEquals("abc", "abc"));

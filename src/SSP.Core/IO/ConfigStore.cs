@@ -142,6 +142,8 @@ public static class ServiceConfigStore
                 ClientName = "Legacy",
                 OneTimeTokenHash = cfg.ActiveOneTimeTokenHash!,
                 CreatedAtUtc = cfg.CreatedAtUtc,
+                FailedAuthenticationCodeAttempts = cfg.ActiveOneTimeTokenFailedAuthenticationCodeAttempts,
+                AuthenticationCodeRetryNotBeforeUtc = cfg.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc,
             });
         }
 

@@ -1,6 +1,6 @@
 # SSP Security Corrections Roadmap
 
-**Status:** Active — Phase 1 implemented; automated validation blocked because the .NET SDK is unavailable in the current environment
+**Status:** Active — Phase 2 implemented; automated validation blocked because the .NET SDK is unavailable in the current environment
 **Authority:** This document is the source of truth for SSP security hardening work.  
 **Execution order:** Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6  
 **Last updated:** 2026-09-05
@@ -33,7 +33,7 @@
 | Phase | Correction | Status | Code review | Automated tests | Threat model update |
 |---|---|---|---|---|---|
 | 1 | Enrollment Authentication Code Protection (M-1) | In progress | Complete (self-review) | Blocked — `dotnet` unavailable | Complete |
-| 2 | Authentication Abuse Resistance (remaining M-1) | Not started | Not started | Not started | Not started |
+| 2 | Authentication Abuse Resistance (remaining M-1) | In progress | Complete (self-review) | Blocked — `dotnet` unavailable | Complete |
 | 3 | Client Private Key Protection (M-2) | Not started | Not started | Not started | Not started |
 | 4 | License State Anti-Rollback Protection (M-3) | Not started | Not started | Not started | Not started |
 | 5 | Runtime Code Integrity Protection (M-4) | Not started | Not started | Not started | Not started |
@@ -59,7 +59,15 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 - **Tests performed:** `dotnet test tests/SSP.Tests/SSP.Tests.csproj --filter FullyQualifiedName~SSP.Tests.F4_EnrollmentTests --no-restore` — **blocked before execution**: `/bin/bash: dotnet: command not found`. `git diff --check` — **passed** with no whitespace errors. Static source check confirmed the new persisted fields, both required event names, and net8.0 test target are present. Automated test status remains Blocked, not Passed.
 - **Remaining risks:** The automated Phase 1 tests must be run in a .NET 8 SDK environment before this phase can be marked Complete. A local administrator capable of rolling back the protected service configuration may restore an earlier counter; roadmap Phase 4 addresses state anti-rollback. Three legitimate typing mistakes intentionally require offline reprovisioning with a new OTT/package. Phase 2 abuse-resistance review (entropy, delays, and rate limiting) remains Not started.
 
-<!-- Add Step 2, Step 3, ... below this line. -->
+### Step 2 — Phase 2 implementation
+
+- **Status:** Implementation complete; phase remains In progress because automated tests could not execute without the .NET SDK.
+- **What changed:** Removed modulo bias from Authentication Code generation (`RandomNumberGenerator.GetInt32`). Added a persisted, per-hashed-OTT progressive cooldown (2s after failure 1, 10s after failure 2) that refuses to mint a new code and does not increment the Phase 1 counter. Added credential-free `Enrollment.AuthenticationCodeRateLimited`. Phase 1 three-attempt lockout is unchanged. No client, wire-protocol, or network dependency was added.
+- **Affected files:** `src/SSP.Core/Crypto/TokenGenerator.cs`; `src/SSP.Core/Crypto/AuthenticationCodeAbusePolicy.cs`; `src/SSP.Core/Models/ServiceConfig.cs`; `src/SSP.Core/IO/ConfigStore.cs`; `src/SSP.Server/Runtime/ServerProtocol.cs`; `tests/SSP.Tests/F3_CryptoTests.cs`; `tests/SSP.Tests/F4_EnrollmentTests.cs`; `tests/SSP.Tests/AuthenticationCodeAbusePolicyTests.cs`; `docs/THREAT_MODEL.md`; `Security Correction.md`.
+- **Tests performed:** `dotnet test tests/SSP.Tests/SSP.Tests.csproj --filter FullyQualifiedName~SSP.Tests.AuthenticationCodeAbusePolicyTests|FullyQualifiedName~SSP.Tests.F3_CryptoTests.AuthenticationCode|FullyQualifiedName~SSP.Tests.F4_EnrollmentTests --no-restore` — **blocked before execution**: `/bin/bash: dotnet: command not found`. Official `dotnet-install.sh` also failed (`SSL_ERROR_SYSCALL` to `dot.net`). `git diff --check` — **passed** with no whitespace errors. Static source check confirmed unbiased `GetInt32` generation, persisted retry-not-before fields, cooldown gate before code minting, and the rate-limit event name. Automated test status remains Blocked, not Passed.
+- **Remaining risks:** Automated Phase 2 tests must be run in a .NET 8 SDK environment. Host clock changes can shorten or lengthen the cooldown (Phase 6). A local administrator can restore an earlier cooldown/counter via `.cache.dat` rollback (Phase 4). 10 decimal digits (~33 bits) remain the human-typed alphabet by design; three guesses plus cooldown keep remote brute force infeasible. Phases 3–6 remain Not started.
+
+<!-- Add Step 3, ... below this line. -->
 
 ---
 
@@ -114,11 +122,11 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 
 **Goal:** Review and improve Authentication Code resistance while remaining fully offline.
 
-**Phase status:** Not started  
-**Current step:** None  
-**Code review:** Not started  
-**Automated tests:** Not started  
-**Threat model update:** Not started
+**Phase status:** In progress — implementation complete; automated validation blocked
+**Current step:** Step 2 — awaiting execution in a .NET 8 SDK environment
+**Code review:** Complete (self-review)
+**Automated tests:** Blocked — `dotnet` is unavailable in the current environment
+**Threat model update:** Complete
 
 ### Review scope
 
@@ -136,15 +144,15 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 
 ### Step completion record
 
-For each Phase 2 step, add a subsection here containing:
+#### Step 2 — Unbiased codes and per-OTT progressive cooldown
 
-- **Status:**
-- **What changed:**
-- **Affected files:**
-- **Tests performed and results:**
-- **Code review:**
-- **Threat model update:**
-- **Remaining risks:**
+- **Status:** Implementation complete; Phase 2 remains In progress pending automated execution.
+- **What changed:** Authentication Codes are generated with unbiased CSPRNG decimal digits (first digit uniform 1–9, remaining digits uniform 0–9). After each of the first two wrong submissions the server persists a per-hashed-OTT retry-not-before timestamp (2s then 10s). A reconnect before that instant is rejected with the existing `verification failed` enrollment result, without minting or displaying a new code and without incrementing the failure counter. `Enrollment.AuthenticationCodeRateLimited` is logged without credentials. The Phase 1 three-attempt permanent OTT revocation is unchanged. The 10-digit human protocol, RSA-PSS trust chain, and offline licensing architecture are unchanged.
+- **Affected files:** `src/SSP.Core/Crypto/TokenGenerator.cs`; `src/SSP.Core/Crypto/AuthenticationCodeAbusePolicy.cs`; `src/SSP.Core/Models/ServiceConfig.cs`; `src/SSP.Core/IO/ConfigStore.cs`; `src/SSP.Server/Runtime/ServerProtocol.cs`; `tests/SSP.Tests/F3_CryptoTests.cs`; `tests/SSP.Tests/F4_EnrollmentTests.cs`; `tests/SSP.Tests/AuthenticationCodeAbusePolicyTests.cs`; `docs/THREAT_MODEL.md`; `Security Correction.md`.
+- **Tests performed and results:** Filtered Authentication Code / F4 / policy tests attempted but blocked because `dotnet` is not installed; `dotnet-install.sh` failed with `SSL_ERROR_SYSCALL` to `dot.net`; `git diff --check` passed.
+- **Code review:** Self-review complete; verified cooldown is keyed per hashed OTT, checked after OTT proof and before code generation, fail-closed on unparsable timestamps, no wire/client/network changes, secret-free events.
+- **Threat model update:** Complete — T31 extended with cooldown, unbiased digits, and `Enrollment.AuthenticationCodeRateLimited`; clock/rollback residuals documented.
+- **Remaining risks:** Run automated tests under .NET 8; Phase 4 anti-rollback, Phase 6 clock protection, and Phases 3/5 remain future work. Three legitimate typing mistakes still require offline reprovisioning.
 
 ---
 

@@ -149,12 +149,17 @@ public class F4_EnrollmentTests
         await using var harness = await SspTestHarness.CreateWithExplicitTokenAsync(ott, "RDP");
 
         for (var attempt = 0; attempt < failures; attempt++)
+        {
             await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+            if (attempt < failures - 1)
+                await ClearAuthenticationCodeCooldownAsync(harness);
+        }
 
         var config = await ServiceConfigStore.LoadAsync(Path.Combine(harness.ServiceDir, ".cache.dat"));
         var pending = Assert.Single(config.PendingOneTimeTokens);
         Assert.Equal(failures, pending.FailedAuthenticationCodeAttempts);
         Assert.NotNull(config.ActiveOneTimeTokenHash);
+        Assert.False(string.IsNullOrEmpty(pending.AuthenticationCodeRetryNotBeforeUtc));
     }
 
     [Fact]
@@ -169,7 +174,11 @@ public class F4_EnrollmentTests
         try
         {
             for (var attempt = 0; attempt < 3; attempt++)
+            {
                 await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+                if (attempt < 2)
+                    await ClearAuthenticationCodeCooldownAsync(harness);
+            }
         }
         finally
         {
@@ -190,7 +199,9 @@ public class F4_EnrollmentTests
         await using var harness = await SspTestHarness.CreateWithExplicitTokenAsync(ott, "RDP");
 
         await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+        await ClearAuthenticationCodeCooldownAsync(harness);
         await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+        await ClearAuthenticationCodeCooldownAsync(harness);
         await EnrollOnceAsync(harness, ott);
 
         var users = await AuthorisedUsersStore.LoadAsync(Path.Combine(harness.ServiceDir, ".index.dat"));
@@ -207,11 +218,72 @@ public class F4_EnrollmentTests
         await using var harness = await SspTestHarness.CreateWithExplicitTokenAsync(ott, "RDP");
 
         for (var attempt = 0; attempt < 3; attempt++)
+        {
             await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+            if (attempt < 2)
+                await ClearAuthenticationCodeCooldownAsync(harness);
+        }
 
         await Assert.ThrowsAnyAsync<Exception>(() => EnrollOnceAsync(harness, ott));
         var users = await AuthorisedUsersStore.LoadAsync(Path.Combine(harness.ServiceDir, ".index.dat"));
         Assert.Empty(users.Users);
+    }
+
+    [Fact]
+    public async Task AuthenticationCodeRetry_BeforeCooldown_IsRateLimitedWithoutIncrementingOrMintingACode()
+    {
+        var ott = TokenGenerator.GenerateOneTimeToken();
+        await using var harness = await SspTestHarness.CreateWithExplicitTokenAsync(ott, "RDP");
+
+        await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+        await ForceAuthenticationCodeCooldownAsync(harness, DateTimeOffset.UtcNow.AddHours(1));
+
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+        var output = new StringWriter();
+        var errors = new StringWriter();
+        Console.SetOut(output);
+        Console.SetError(errors);
+        try
+        {
+            var (runtime, _) = await harness.CreateClientRuntimeAsync(ott);
+            var protocol = new ClientProtocol(
+                runtime,
+                () => throw new InvalidOperationException(
+                    "Authentication code reader must not run during cooldown."));
+            var ex = await Assert.ThrowsAnyAsync<Exception>(
+                () => protocol.ConnectAndAuthenticateAsync());
+            Assert.Contains("verification failed", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
+
+        var config = await ServiceConfigStore.LoadAsync(Path.Combine(harness.ServiceDir, ".cache.dat"));
+        var pending = Assert.Single(config.PendingOneTimeTokens);
+        Assert.Equal(1, pending.FailedAuthenticationCodeAttempts);
+        Assert.NotNull(config.ActiveOneTimeTokenHash);
+        Assert.False(EnrollmentHelper.TryReadAuthenticationCode(output.ToString(), out _));
+        Assert.Contains("event=Enrollment.AuthenticationCodeRateLimited failedAttempts=1", errors.ToString());
+    }
+
+    [Fact]
+    public async Task AuthenticationCodeRetry_AfterCooldown_AllowsAnotherGuess()
+    {
+        var ott = TokenGenerator.GenerateOneTimeToken();
+        await using var harness = await SspTestHarness.CreateWithExplicitTokenAsync(ott, "RDP");
+
+        await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+        await ForceAuthenticationCodeCooldownAsync(harness, DateTimeOffset.UtcNow.AddSeconds(-1));
+        await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+
+        var config = await ServiceConfigStore.LoadAsync(Path.Combine(harness.ServiceDir, ".cache.dat"));
+        var pending = Assert.Single(config.PendingOneTimeTokens);
+        Assert.Equal(2, pending.FailedAuthenticationCodeAttempts);
+        Assert.NotNull(config.ActiveOneTimeTokenHash);
+        Assert.False(string.IsNullOrEmpty(pending.AuthenticationCodeRetryNotBeforeUtc));
     }
 
     [Fact]
@@ -233,6 +305,29 @@ public class F4_EnrollmentTests
         Assert.True(EnrollmentHelper.TryReadAuthenticationCode(output, out var code));
         Assert.Equal("5839201746", code);
         Assert.NotEqual("1234567890", code);
+    }
+
+    private static Task ClearAuthenticationCodeCooldownAsync(SspTestHarness harness) =>
+        ForceAuthenticationCodeCooldownAsync(harness, retryNotBeforeUtc: null);
+
+    private static Task ForceAuthenticationCodeCooldownAsync(
+        SspTestHarness harness,
+        DateTimeOffset retryNotBefore) =>
+        ForceAuthenticationCodeCooldownAsync(harness, retryNotBefore.ToString("o"));
+
+    private static async Task ForceAuthenticationCodeCooldownAsync(
+        SspTestHarness harness,
+        string? retryNotBeforeUtc)
+    {
+        var path = Path.Combine(harness.ServiceDir, ".cache.dat");
+        using (await ServiceConfigFileLock.AcquireAsync(harness.ServiceDir))
+        {
+            var config = await ServiceConfigStore.LoadAsync(path);
+            config.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc = retryNotBeforeUtc;
+            foreach (var pending in config.PendingOneTimeTokens)
+                pending.AuthenticationCodeRetryNotBeforeUtc = retryNotBeforeUtc;
+            await ServiceConfigStore.SaveAsync(path, config);
+        }
     }
 
     private static async Task AttemptEnrollmentWithWrongCodeAsync(
