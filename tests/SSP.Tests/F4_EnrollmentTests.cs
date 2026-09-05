@@ -140,6 +140,80 @@ public class F4_EnrollmentTests
             () => protocol2.ConnectAndAuthenticateAsync());
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task WrongAuthenticationCode_BeforeLimit_PersistsAttemptAndKeepsOttValid(int failures)
+    {
+        var ott = TokenGenerator.GenerateOneTimeToken();
+        await using var harness = await SspTestHarness.CreateWithExplicitTokenAsync(ott, "RDP");
+
+        for (var attempt = 0; attempt < failures; attempt++)
+            await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+
+        var config = await ServiceConfigStore.LoadAsync(Path.Combine(harness.ServiceDir, ".cache.dat"));
+        var pending = Assert.Single(config.PendingOneTimeTokens);
+        Assert.Equal(failures, pending.FailedAuthenticationCodeAttempts);
+        Assert.NotNull(config.ActiveOneTimeTokenHash);
+    }
+
+    [Fact]
+    public async Task ThirdWrongAuthenticationCode_RevokesOttAndEmitsSecurityEvents()
+    {
+        var ott = TokenGenerator.GenerateOneTimeToken();
+        await using var harness = await SspTestHarness.CreateWithExplicitTokenAsync(ott, "RDP");
+        var originalError = Console.Error;
+        var errors = new StringWriter();
+        Console.SetError(errors);
+
+        try
+        {
+            for (var attempt = 0; attempt < 3; attempt++)
+                await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+        }
+        finally
+        {
+            Console.SetError(originalError);
+        }
+
+        var config = await ServiceConfigStore.LoadAsync(Path.Combine(harness.ServiceDir, ".cache.dat"));
+        Assert.Empty(config.PendingOneTimeTokens);
+        Assert.Null(config.ActiveOneTimeTokenHash);
+        Assert.Contains("event=Enrollment.AuthenticationCodeFailed", errors.ToString());
+        Assert.Contains("event=Enrollment.OTTRevokedAfterFailedAttempts failedAttempts=3", errors.ToString());
+    }
+
+    [Fact]
+    public async Task CorrectAuthenticationCode_AfterTwoFailures_EnrollsSuccessfully()
+    {
+        var ott = TokenGenerator.GenerateOneTimeToken();
+        await using var harness = await SspTestHarness.CreateWithExplicitTokenAsync(ott, "RDP");
+
+        await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+        await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+        await EnrollOnceAsync(harness, ott);
+
+        var users = await AuthorisedUsersStore.LoadAsync(Path.Combine(harness.ServiceDir, ".index.dat"));
+        Assert.Single(users.Users);
+        var config = await ServiceConfigStore.LoadAsync(Path.Combine(harness.ServiceDir, ".cache.dat"));
+        Assert.Empty(config.PendingOneTimeTokens);
+        Assert.Null(config.ActiveOneTimeTokenHash);
+    }
+
+    [Fact]
+    public async Task CorrectAuthenticationCode_AfterThreeFailures_CannotEnrollSamePackage()
+    {
+        var ott = TokenGenerator.GenerateOneTimeToken();
+        await using var harness = await SspTestHarness.CreateWithExplicitTokenAsync(ott, "RDP");
+
+        for (var attempt = 0; attempt < 3; attempt++)
+            await AttemptEnrollmentWithWrongCodeAsync(harness, ott);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => EnrollOnceAsync(harness, ott));
+        var users = await AuthorisedUsersStore.LoadAsync(Path.Combine(harness.ServiceDir, ".index.dat"));
+        Assert.Empty(users.Users);
+    }
+
     [Fact]
     public void AuthenticationCodeReader_IgnoresFingerprintThatStartsWithTenDigits()
     {
@@ -159,6 +233,41 @@ public class F4_EnrollmentTests
         Assert.True(EnrollmentHelper.TryReadAuthenticationCode(output, out var code));
         Assert.Equal("5839201746", code);
         Assert.NotEqual("1234567890", code);
+    }
+
+    private static async Task AttemptEnrollmentWithWrongCodeAsync(
+        SspTestHarness harness,
+        string ott)
+    {
+        var (runtime, _) = await harness.CreateClientRuntimeAsync(ott);
+        var originalOut = Console.Out;
+        var output = new StringWriter();
+        Console.SetOut(output);
+
+        try
+        {
+            var protocol = new ClientProtocol(
+                runtime,
+                async () =>
+                {
+                    while (true)
+                    {
+                        if (EnrollmentHelper.TryReadAuthenticationCode(output.ToString(), out var code))
+                        {
+                            var replacement = code[0] == '0' ? '1' : '0';
+                            return replacement + code[1..];
+                        }
+
+                        await Task.Delay(20);
+                    }
+                });
+
+            await Assert.ThrowsAnyAsync<Exception>(() => protocol.ConnectAndAuthenticateAsync());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+        }
     }
 
     private static async Task EnrollOnceAsync(

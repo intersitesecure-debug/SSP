@@ -36,10 +36,12 @@ This threat model covers the SSP licensing subsystem end to end:
   `src/SSP.Server/Activation/SspTrustAnchor.targets`.
 
 Out of scope (unchanged by licensing, per the plan §9): the enrollment/tunnel
-cryptography (`RsaCrypto`, AES-GCM, OTT lifecycle, session keys), the patch-slot
-client mechanism, and the Windows service control contract. Licensing never
-touches the wire protocol or the data plane; the client carries no licensing
-code.
+cryptography (`RsaCrypto`, AES-GCM, session keys), the patch-slot client
+mechanism, and the Windows service control contract. The enrollment OTT
+lifecycle is in scope only for the Phase 1 failed-Authentication-Code attempt
+limit described by T31; its cryptographic construction and wire protocol remain
+unchanged. Licensing never touches the wire protocol or the data plane; the
+client carries no licensing code.
 
 ## 2. Assets and trust boundary
 
@@ -101,8 +103,9 @@ Each row: threat → surface → mitigation → **machine-checked by**.
 | T26 | Self-generated license / self-signed certification (v2) | The root authority is the only trust anchor; a certification not signed by the compiled-in root fails (`invalid_certification_signature`) | `LicenseKeyCertificationTests.CertificationSignedByWrongRoot_IsRejected` |
 | T27 | License A key compromise forging license B (v2) | Each license gets a fresh leaf key; the certification binds `LicenseId`/`ProductId`/`CustomerId` to the certified SPKI, so A's key cannot authenticate B's payload (binding mismatch) | `LicenseKeyCertificationTests.LicenseAKey_CannotForgeLicenseB`; `CertificationForAnotherLicense_IsRejected_AsBindingMismatch` |
 | T28 | Certification tampering / expiry / unusable key (v2) | Certification is canonicalized and root-signed; tampering fails the signature; an expired / not-yet-valid / undersized certified key fails closed | `LicenseKeyCertificationTests` (tamper/expiry/not-yet-valid/undersized cases) |
-| T29 | Activation bypass: guessing or replaying a code, or activating the wrong license | Code is 10 digits (100-bit entropy), hashed with SHA-256 into the certification and compared constant-time; the persisted `ActivatedLicenseId` binds activation to exactly one license; a wrong code keeps `ActivationRequired` | `ActivationLifecycleTests`; `LicenseActivationTests` |
+| T29 | Licensing activation bypass: guessing or replaying a code, or activating the wrong license | The licensing activation code is hashed with SHA-256 into the certification and compared constant-time; the persisted `ActivatedLicenseId` binds activation to exactly one license; a wrong code keeps `ActivationRequired` | `ActivationLifecycleTests`; `LicenseActivationTests` |
 | T30 | Offline activation-request forgery / OTT replay | The OTT is authority-generated 256-bit random, signed into the certification, and matched constant-time against the authority's own record; it is single-use and consumed only on a successful match | `LicenseAuthorityActivationTests`; `LicenseActivationTests.OttMatches_IsConstantTimeAndStrict` |
+| T31 | Brute-force the 10-digit client-enrollment Authentication Code by repeatedly reconnecting with a copied package's still-valid OTT | `.cache.dat` persists a failed-code counter per hashed OTT under the existing enrollment and cross-process configuration locks. Failures one and two retain the OTT; failure three removes both pending and legacy authorization for that hash, permanently invalidating every copy of the package. Logs emit stable, credential-free `Enrollment.AuthenticationCodeFailed` and `Enrollment.OTTRevokedAfterFailedAttempts` events. Counters and codes never enter the client or wire protocol | `F4_EnrollmentTests.WrongAuthenticationCode_BeforeLimit_PersistsAttemptAndKeepsOttValid`; `ThirdWrongAuthenticationCode_RevokesOttAndEmitsSecurityEvents`; `CorrectAuthenticationCode_AfterTwoFailures_EnrollsSuccessfully`; `CorrectAuthenticationCode_AfterThreeFailures_CannotEnrollSamePackage` |
 
 ## 5. Build-time trust decisions (recorded here, as the blueprint requires)
 
@@ -203,6 +206,14 @@ possible without behavioural change; the reference audit rated it Low.
 * **Artifact size is bounded** (256 KiB cap, fail-closed) to blunt resource
   exhaustion.
 * **Clock manipulation** is only partially mitigable offline (§7.7).
+* **Enrollment attempt tracking is local server state.** A local administrator
+  who can restore an older protected `.cache.dat` together with the surrounding
+  machine state may restore an earlier attempt count. Phase 1 prevents remote
+  unlimited guessing and survives ordinary process/service restarts; stronger
+  anti-rollback protection is intentionally deferred to roadmap Phase 4.
+* **A revoked enrollment OTT requires reprovisioning.** Three operator typing
+  mistakes permanently invalidate that client package by design; recovery is
+  to provision a new package/OTT through the existing offline setup workflow.
 * **Feature/limit vocabularies are host conventions**: the library validates
   shape and normalization; `SspLicensing.Features`/`Limits` define what
   `rdp`/`ssh`/`web`/`sql` and the limit names mean for SSP, and
