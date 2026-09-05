@@ -406,7 +406,30 @@ public static class ProtectedFileStore
         var plaintext = new byte[ciphertext.Length];
 
         using var aes = new AesGcm(key, AesTagSizeBytes);
-        aes.Decrypt(nonce, ciphertext, tag, plaintext);
+        try
+        {
+            aes.Decrypt(nonce, ciphertext, tag, plaintext);
+        }
+        catch (AuthenticationTagMismatchException ex)
+        {
+            // A tag mismatch is the fail-closed signal for foreign or
+            // corrupted key material: the envelope was written under a key
+            // this host/user does not hold (another user's/machine's
+            // envelope, corruption, a lost user profile). Since .NET 8
+            // AesGcm.Decrypt surfaces that as the derived
+            // AuthenticationTagMismatchException; callers - and the §19
+            // fail-closed tests - match the Windows DPAPI contract, where
+            // ProtectedData.Unprotect on foreign material throws exactly
+            // CryptographicException. Re-throw the base type (with the
+            // original as inner) so both paths fail closed with the SAME
+            // exception type and nothing downstream has to know which
+            // platform it is running on. The load still throws; only the
+            // (already documented) exception type is normalized.
+            throw new CryptographicException(
+                "SSP encrypted-at-rest payload failed authentication: the key material " +
+                "does not belong to this user/machine (foreign or corrupted envelope).",
+                ex);
+        }
         return plaintext;
     }
 
