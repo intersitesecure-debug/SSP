@@ -17,6 +17,15 @@
 // and decrypted transparently on read. Legacy plaintext files (from the
 // pre-encryption layout) are migrated into the envelope on first read,
 // replacing the plaintext in place.
+//
+// The SCOPE differs from the server-side files (Phase 3 / M-2): the
+// client files use DPAPI CurrentUser scope
+// (ClientInstallPaths.ClientConnectionProtectionScope), because the
+// client is a desktop app whose identity is created and used by the
+// same interactive user only. Every other local account on the machine
+// can read the file bytes (C:\Program Files is world-readable) but
+// cannot decrypt them; a file whose owner can no longer decrypt it
+// fails closed instead of regenerating the identity.
 
 using System.Security.Cryptography;
 using SSP.Core.Crypto;
@@ -84,9 +93,17 @@ public sealed class ClientRuntime
             // transparently decrypts them via the same ProtectedFileStore
             // mechanism the server-side key files use, and migrates a
             // legacy plaintext file into the encrypted envelope on load.
-            var privPem = await PemStore.LoadPrivateKeyAsync(runtime.PrivateKeyPath);
+            // The scope is CurrentUser (Phase 3 / M-2): the client identity
+            // is bound to the user who created it, so no other local
+            // account can recover the private key even though the file
+            // itself is world-readable inside C:\Program Files.
+            var privPem = await PemStore.LoadPrivateKeyAsync(
+                runtime.PrivateKeyPath,
+                ClientInstallPaths.ClientConnectionProtectionScope);
             runtime.ClientPrivateKey = RsaCrypto.ImportPrivateKeyPem(privPem);
-            runtime.ClientPublicKeyPem = await PemStore.LoadPublicKeyAsync(runtime.PublicKeyPath);
+            runtime.ClientPublicKeyPem = await PemStore.LoadPublicKeyAsync(
+                runtime.PublicKeyPath,
+                ClientInstallPaths.ClientConnectionProtectionScope);
 
             // Per-connection enrollment state. When a profile exists it is
             // authoritative AND it must belong to this exact connection:
@@ -121,9 +138,14 @@ public sealed class ClientRuntime
             // these saves through the same encrypted-at-rest envelope the
             // server-side key files use. The PEM never reaches disk in
             // plaintext, and the read paths above decrypt transparently.
+            // CurrentUser scope: the identity belongs to this interactive
+            // user and must stay unreadable to every other account on the
+            // machine (Phase 3 / M-2).
             await PemStore.SavePrivateKeyAsync(runtime.PrivateKeyPath,
-                RsaCrypto.ExportPrivateKeyPem(runtime.ClientPrivateKey));
-            await PemStore.SavePublicKeyAsync(runtime.PublicKeyPath, runtime.ClientPublicKeyPem);
+                RsaCrypto.ExportPrivateKeyPem(runtime.ClientPrivateKey),
+                ClientInstallPaths.ClientConnectionProtectionScope);
+            await PemStore.SavePublicKeyAsync(runtime.PublicKeyPath, runtime.ClientPublicKeyPem,
+                ClientInstallPaths.ClientConnectionProtectionScope);
             runtime.IsEnrolled = false;
         }
         else
@@ -154,10 +176,15 @@ public sealed class ClientRuntime
     public async Task ReloadKeysAsync()
     {
         // Encrypted-at-rest read (transparent decryption + legacy
-        // plaintext migration), same mechanism as the initial load.
-        var privPem = await PemStore.LoadPrivateKeyAsync(PrivateKeyPath);
+        // plaintext migration, CurrentUser scope), same mechanism as the
+        // initial load.
+        var privPem = await PemStore.LoadPrivateKeyAsync(
+            PrivateKeyPath,
+            ClientInstallPaths.ClientConnectionProtectionScope);
         ClientPrivateKey = RsaCrypto.ImportPrivateKeyPem(privPem);
-        ClientPublicKeyPem = await PemStore.LoadPublicKeyAsync(PublicKeyPath);
+        ClientPublicKeyPem = await PemStore.LoadPublicKeyAsync(
+            PublicKeyPath,
+            ClientInstallPaths.ClientConnectionProtectionScope);
         ClientPublicKeyFingerprint = RsaCrypto.ComputePublicKeyFingerprint(ClientPrivateKey);
         IsEnrolled = true;
         await SaveStateAsync(enrolled: true);

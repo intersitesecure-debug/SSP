@@ -4,48 +4,74 @@
 // key filenames (.sysdata.bin and .runtime.dat) are encrypted at rest;
 // other PEM files keep their existing format. Private-key files are also
 // written with restrictive permissions on Unix (chmod 600).
+//
+// Protection scope (Phase 3 / M-2 of the Security Correction roadmap):
+//   * SERVER-side key files default to DPAPI LocalMachine scope: setup
+//     mode writes them elevated and the gateway Windows Service
+//     (LocalSystem) must read them back at runtime.
+//   * CLIENT-side connection key files (connections/{ConnectionId}/) are
+//     written and read with DataProtectionScope.CurrentUser
+//     (ClientInstallPaths.ClientConnectionProtectionScope): the client is
+//     a desktop app, the same interactive user both creates the identity
+//     and reads it back, and no other account may recover the private
+//     key even though C:\Program Files files are readable by every local
+//     user. See ProtectedFileStore for the scope semantics.
+
+using System.Security.Cryptography;
 
 namespace SSP.Core.IO;
 
 public static class PemStore
 {
-    public static async Task SavePrivateKeyAsync(string path, string pem, CancellationToken ct = default)
+    public static async Task SavePrivateKeyAsync(
+        string path, string pem,
+        DataProtectionScope scope = DataProtectionScope.LocalMachine,
+        CancellationToken ct = default)
     {
         if (ProtectedFileStore.IsProtectedPath(path))
-            await ProtectedFileStore.WriteTextAsync(path, pem, ct).ConfigureAwait(false);
+            await ProtectedFileStore.WriteTextAsync(path, pem, scope, ct).ConfigureAwait(false);
         else
             await AtomicFile.WriteTextAsync(path, pem, ct).ConfigureAwait(false);
 
         TryRestrictFilePermissions(path);
     }
 
-    public static async Task SavePublicKeyAsync(string path, string pem, CancellationToken ct = default)
+    public static async Task SavePublicKeyAsync(
+        string path, string pem,
+        DataProtectionScope scope = DataProtectionScope.LocalMachine,
+        CancellationToken ct = default)
     {
         if (ProtectedFileStore.IsProtectedPath(path))
-            await ProtectedFileStore.WriteTextAsync(path, pem, ct).ConfigureAwait(false);
+            await ProtectedFileStore.WriteTextAsync(path, pem, scope, ct).ConfigureAwait(false);
         else
             await AtomicFile.WriteTextAsync(path, pem, ct).ConfigureAwait(false);
     }
 
-    public static async Task<string> LoadPrivateKeyAsync(string path, CancellationToken ct = default)
+    public static async Task<string> LoadPrivateKeyAsync(
+        string path,
+        DataProtectionScope scope = DataProtectionScope.LocalMachine,
+        CancellationToken ct = default)
     {
         if (!ProtectedFileStore.IsProtectedPath(path))
             return await AtomicFile.ReadTextAsync(path, ct).ConfigureAwait(false);
 
-        var read = await ProtectedFileStore.ReadTextAsync(path, ct).ConfigureAwait(false);
-        await ProtectedFileStore.MigratePlaintextAsync(path, read, ct).ConfigureAwait(false);
+        var read = await ProtectedFileStore.ReadTextAsync(path, scope, ct).ConfigureAwait(false);
+        await ProtectedFileStore.MigratePlaintextAsync(path, read, scope, ct).ConfigureAwait(false);
         if (read.WasPlaintextProtectedFile)
             TryRestrictFilePermissions(path);
         return read.Text;
     }
 
-    public static async Task<string> LoadPublicKeyAsync(string path, CancellationToken ct = default)
+    public static async Task<string> LoadPublicKeyAsync(
+        string path,
+        DataProtectionScope scope = DataProtectionScope.LocalMachine,
+        CancellationToken ct = default)
     {
         if (!ProtectedFileStore.IsProtectedPath(path))
             return await AtomicFile.ReadTextAsync(path, ct).ConfigureAwait(false);
 
-        var read = await ProtectedFileStore.ReadTextAsync(path, ct).ConfigureAwait(false);
-        await ProtectedFileStore.MigratePlaintextAsync(path, read, ct).ConfigureAwait(false);
+        var read = await ProtectedFileStore.ReadTextAsync(path, scope, ct).ConfigureAwait(false);
+        await ProtectedFileStore.MigratePlaintextAsync(path, read, scope, ct).ConfigureAwait(false);
         return read.Text;
     }
 

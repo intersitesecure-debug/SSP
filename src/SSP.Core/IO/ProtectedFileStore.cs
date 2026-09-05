@@ -1,17 +1,44 @@
 // File: src/SSP.Core/IO/ProtectedFileStore.cs
 //
-// Encryption-at-rest for SSP service-directory state files:
+// Encryption-at-rest for SSP state files:
 //   - .cache.dat
 //   - .sysdata.bin
 //   - .runtime.dat
 //   - .index.dat
 //   - .license-state.dat   (activation anti-rollback state; see SspLicenseStateStore)
 //
-// Production Windows builds use DPAPI (ProtectedData) with LocalMachine
-// scope so data written during SETUP MODE remains readable by the Windows
-// Service account at runtime. The encryption key is managed by Windows and
-// is never written to the service directory, the protected files, or the
-// repository.
+// Production Windows builds use DPAPI (ProtectedData). The protection SCOPE
+// is a per-caller decision recorded inside the envelope:
+//
+//   * LocalMachine scope (envelope algorithm bytes 1 / 2) - SERVER-side
+//     service files. Setup mode runs elevated and the gateway Windows
+//     Service (LocalSystem) must be able to read what setup wrote, so the
+//     files must be decryptable across user contexts on the same machine.
+//
+//   * CurrentUser scope (envelope algorithm bytes 3 / 4) - CLIENT-side
+//     connection files (connections/{ConnectionId}/). The client is a
+//     desktop application: the same interactive user both generates the
+//     client identity key pair and later reads it back, and no other
+//     identity ever needs to read those files. CurrentUser scope therefore
+//     binds decryption to the user's own DPAPI master key: ANY other local
+//     account (administrator or not) can read the file bytes but cannot
+//     decrypt them. LocalMachine scope would have let any logged-in user on
+//     the machine recover the client private key (MS-CryptProtectData:
+//     "any user on the computer ... can use CryptUnprotectData to decrypt
+//     the data"), which is exactly the local impersonation path Phase 3
+//     (M-2) of the Security Correction roadmap closes.
+//
+// The decryption scope is ALWAYS the one recorded in the envelope
+// (authoritative), never the caller's requested scope; the requested scope
+// only decides which scope a newly written (or migrated / re-wrapped)
+// file gets. Existing LocalMachine envelopes written by earlier builds are
+// still decrypted, and client files found in a LocalMachine envelope are
+// re-wrapped into CurrentUser scope on first read (best effort), so
+// pre-existing client installations are upgraded in place without
+// re-enrollment.
+//
+// The encryption key is managed by Windows and is never written to the
+// service directory, the protected files, or the repository.
 
 using System.Security.Cryptography;
 using System.Text;
@@ -26,14 +53,27 @@ namespace SSP.Core.IO;
 public static class ProtectedFileStore
 {
     private static readonly byte[] Magic = "SSP-EAR1"u8.ToArray();
+
+    // Envelope algorithm bytes. Bytes 1/3 select the Windows DPAPI envelope
+    // (machine vs current-user scope); bytes 2/4 select the non-Windows
+    // AES-GCM fallback (test/development hosts) with the corresponding
+    // scope marker, so the recorded scope is deterministic on every
+    // platform.
     private const byte DpapiLocalMachineAlgorithm = 1;
     private const byte NonWindowsAesGcmAlgorithm = 2;
+    private const byte DpapiCurrentUserAlgorithm = 3;
+    private const byte NonWindowsAesGcmCurrentUserAlgorithm = 4;
+
     private const int AesKeySizeBytes = 32;
     private const int AesNonceSizeBytes = 12;
     private const int AesTagSizeBytes = 16;
 
     // DPAPI optional entropy is a purpose string, not a secret key. Keeping
     // it in code prevents accidental cross-use with unrelated ProtectedData.
+    // The SAME entropy is used for both scopes: the scope recorded in the
+    // envelope is the differentiator, and reusing the string keeps the
+    // re-wrap migration of legacy LocalMachine client envelopes
+    // deterministic (no entropy guessing on the read path).
     private static readonly byte[] DpapiOptionalEntropy =
         Encoding.UTF8.GetBytes("SSP encrypted-at-rest service storage v1");
 
@@ -52,7 +92,8 @@ public static class ProtectedFileStore
     public readonly record struct ReadTextResult(
         string Text,
         bool WasEncrypted,
-        bool WasPlaintextProtectedFile);
+        bool WasPlaintextProtectedFile,
+        DataProtectionScope? EnvelopeScope = null);
 
     /// <summary>
     /// True only for the SSP state files covered by the encrypted-at-rest
@@ -75,6 +116,29 @@ public static class ProtectedFileStore
     }
 
     /// <summary>
+    /// Test/diagnostic helper: returns the protection scope recorded in an
+    /// existing envelope (LocalMachine for bytes 1/2, CurrentUser for
+    /// bytes 3/4), or null when the bytes are not an SSP envelope.
+    /// Throws <see cref="CryptographicException"/> for an unknown
+    /// algorithm byte so tests can fail loudly instead of guessing.
+    /// </summary>
+    public static DataProtectionScope? GetEnvelopeScope(byte[] bytes)
+    {
+        if (!HasEncryptedEnvelope(bytes))
+            return null;
+
+        return bytes[Magic.Length] switch
+        {
+            DpapiLocalMachineAlgorithm => DataProtectionScope.LocalMachine,
+            NonWindowsAesGcmAlgorithm => DataProtectionScope.LocalMachine,
+            DpapiCurrentUserAlgorithm => DataProtectionScope.CurrentUser,
+            NonWindowsAesGcmCurrentUserAlgorithm => DataProtectionScope.CurrentUser,
+            _ => throw new CryptographicException(
+                $"Unsupported SSP encrypted-at-rest file format version/algorithm: {bytes[Magic.Length]}.")
+        };
+    }
+
+    /// <summary>
     /// Diagnostics only: Windows uses DPAPI and therefore has no SSP key file.
     /// Non-Windows test/development hosts keep their fallback key outside the
     /// repository and outside service directories.
@@ -82,7 +146,19 @@ public static class ProtectedFileStore
     public static string? ExternalKeyPathForDiagnostics =>
         OperatingSystem.IsWindows() ? null : ResolveNonWindowsKeyPath();
 
-    public static async Task<ReadTextResult> ReadTextAsync(string path, CancellationToken ct = default)
+    /// <summary>
+    /// Reads a protected file. The decryption uses the scope RECORDED IN THE
+    /// ENVELOVE (not <paramref name="scope"/>); <paramref name="scope"/> is
+    /// the scope that <see cref="MigratePlaintextAsync"/> migrates to when
+    /// the file is plaintext or written with a different scope. The
+    /// LocalMachine default keeps every pre-Phase-3 server-side call site
+    /// byte- and behavior-identical.
+    /// </summary>
+    public static Task<ReadTextResult> ReadTextAsync(string path, CancellationToken ct = default)
+        => ReadTextAsync(path, DataProtectionScope.LocalMachine, ct);
+
+    public static async Task<ReadTextResult> ReadTextAsync(
+        string path, DataProtectionScope scope, CancellationToken ct = default)
     {
         var bytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
         var protectedPath = IsProtectedPath(path);
@@ -91,7 +167,8 @@ public static class ProtectedFileStore
             return new ReadTextResult(
                 DecodeUtf8Text(plaintext),
                 WasEncrypted: true,
-                WasPlaintextProtectedFile: false);
+                WasPlaintextProtectedFile: false,
+                EnvelopeScope: GetEnvelopeScope(bytes));
         }
 
         return new ReadTextResult(
@@ -100,27 +177,69 @@ public static class ProtectedFileStore
             WasPlaintextProtectedFile: protectedPath);
     }
 
+    /// <summary>
+    /// Writes a protected file in the given scope (LocalMachine by default -
+    /// the server-side contract; client-side callers pass CurrentUser).
+    /// </summary>
     public static Task WriteTextAsync(string path, string content, CancellationToken ct = default)
+        => WriteTextAsync(path, content, DataProtectionScope.LocalMachine, ct);
+
+    public static Task WriteTextAsync(
+        string path, string content, DataProtectionScope scope, CancellationToken ct = default)
     {
         if (!IsProtectedPath(path))
             return AtomicFile.WriteTextAsync(path, content, ct);
 
         var plaintext = Encoding.UTF8.GetBytes(content);
-        var protectedBytes = Protect(plaintext);
+        var protectedBytes = Protect(plaintext, scope);
         CryptographicOperations.ZeroMemory(plaintext);
         return AtomicFile.WriteBytesAsync(path, protectedBytes, ct);
     }
 
     /// <summary>
     /// Rewrites an existing plaintext protected file into the encrypted
-    /// envelope after the higher-level store has successfully validated it.
+    /// envelope after the higher-level store has successfully validated it
+    /// (legacy behavior; a failed migration still propagates, exactly as
+    /// before Phase 3).
     /// </summary>
     public static Task MigratePlaintextAsync(string path, ReadTextResult read, CancellationToken ct = default)
-    {
-        if (!read.WasPlaintextProtectedFile)
-            return Task.CompletedTask;
+        => MigratePlaintextAsync(path, read, DataProtectionScope.LocalMachine, ct);
 
-        return WriteTextAsync(path, read.Text, ct);
+    /// <summary>
+    /// Two side-effect upgrades, both applied only AFTER a successful read:
+    ///
+    /// 1. Legacy plaintext protected files are rewritten into the encrypted
+    ///    envelope in <paramref name="scope"/> (a failed write propagates,
+    ///    preserving the pre-Phase-3 contract).
+    ///
+    /// 2. An already-encrypted file whose envelope records a DIFFERENT scope
+    ///    than requested (e.g. a pre-Phase-3 client identity envelope still
+    ///    protected LocalMachine) is re-wrapped into <paramref name="scope"/>.
+    ///    This re-wrap is best effort: the logical content was already read
+    ///    successfully, so a write failure must never mask the read and
+    ///    break an otherwise working client - the next successful write will
+    ///    land in the requested scope anyway.
+    /// </summary>
+    public static Task MigratePlaintextAsync(
+        string path, ReadTextResult read, DataProtectionScope scope, CancellationToken ct = default)
+    {
+        if (read.WasPlaintextProtectedFile)
+            return WriteTextAsync(path, read.Text, scope, ct);
+
+        if (read.WasEncrypted && read.EnvelopeScope is { } envelopeScope && envelopeScope != scope)
+        {
+            try
+            {
+                return WriteTextAsync(path, read.Text, scope, ct);
+            }
+            catch
+            {
+                // Best effort only (see remarks); the validated content is
+                // already available to the caller in memory.
+            }
+        }
+
+        return Task.CompletedTask;
     }
 
     private static string DecodeUtf8Text(byte[] bytes)
@@ -129,19 +248,26 @@ public static class ProtectedFileStore
         return text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text;
     }
 
-    private static byte[] Protect(byte[] plaintext)
+    private static byte[] Protect(byte[] plaintext, DataProtectionScope scope)
     {
         if (OperatingSystem.IsWindows())
         {
+            var algorithm = scope == DataProtectionScope.CurrentUser
+                ? DpapiCurrentUserAlgorithm
+                : DpapiLocalMachineAlgorithm;
             var protectedPayload = ProtectedData.Protect(
                 plaintext,
                 DpapiOptionalEntropy,
-                DataProtectionScope.LocalMachine);
+                scope);
 
-            return BuildEnvelope(DpapiLocalMachineAlgorithm, protectedPayload);
+            return BuildEnvelope(algorithm, protectedPayload);
         }
 
-        return ProtectWithNonWindowsAesGcm(plaintext);
+        var nonWindowsAlgorithm = scope == DataProtectionScope.CurrentUser
+            ? NonWindowsAesGcmCurrentUserAlgorithm
+            : NonWindowsAesGcmAlgorithm;
+        var payload = AesGcmEncrypt(plaintext);
+        return BuildEnvelope(nonWindowsAlgorithm, payload);
     }
 
     private static bool TryUnprotect(byte[] bytes, out byte[] plaintext)
@@ -154,11 +280,25 @@ public static class ProtectedFileStore
         var algorithm = bytes[Magic.Length];
         var payload = bytes.AsSpan(Magic.Length + 1);
 
+        // The scope recorded in the envelope is authoritative for
+        // decryption; a caller requesting a different scope can never
+        // change WHICH key material Windows applies to the payload.
+        var scope = algorithm switch
+        {
+            DpapiLocalMachineAlgorithm or NonWindowsAesGcmAlgorithm => DataProtectionScope.LocalMachine,
+            DpapiCurrentUserAlgorithm or NonWindowsAesGcmCurrentUserAlgorithm => DataProtectionScope.CurrentUser,
+            _ => throw new CryptographicException(
+                $"Unsupported SSP encrypted-at-rest file format version/algorithm: {algorithm}.")
+        };
+
         plaintext = algorithm switch
         {
-            DpapiLocalMachineAlgorithm => UnprotectWithWindowsDpapi(payload),
-            NonWindowsAesGcmAlgorithm => UnprotectWithNonWindowsAesGcm(payload),
-            _ => throw new CryptographicException($"Unsupported SSP encrypted-at-rest file format version/algorithm: {algorithm}.")
+            DpapiLocalMachineAlgorithm or DpapiCurrentUserAlgorithm =>
+                UnprotectWithWindowsDpapi(payload, scope),
+            NonWindowsAesGcmAlgorithm or NonWindowsAesGcmCurrentUserAlgorithm =>
+                UnprotectWithNonWindowsAesGcm(payload),
+            _ => throw new CryptographicException(
+                $"Unsupported SSP encrypted-at-rest file format version/algorithm: {algorithm}.")
         };
 
         return true;
@@ -173,7 +313,7 @@ public static class ProtectedFileStore
         return envelope;
     }
 
-    private static byte[] UnprotectWithWindowsDpapi(ReadOnlySpan<byte> payload)
+    private static byte[] UnprotectWithWindowsDpapi(ReadOnlySpan<byte> payload, DataProtectionScope scope)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("DPAPI-protected SSP files can only be decrypted on Windows.");
@@ -181,7 +321,7 @@ public static class ProtectedFileStore
         return ProtectedData.Unprotect(
             payload.ToArray(),
             DpapiOptionalEntropy,
-            DataProtectionScope.LocalMachine);
+            scope);
     }
 
     /// <summary>
@@ -190,9 +330,11 @@ public static class ProtectedFileStore
     /// suite can exercise encrypted-at-rest semantics without DPAPI. The
     /// generated key is outside the repository and outside every service
     /// directory, protected by user-only filesystem permissions where the
-    /// platform supports them.
+    /// platform supports them. Both scope markers (bytes 2 and 4) use the
+    /// same fallback key: on these hosts the scope is a recorded marker for
+    /// deterministic tests, not a separate key hierarchy.
     /// </summary>
-    private static byte[] ProtectWithNonWindowsAesGcm(byte[] plaintext)
+    private static byte[] AesGcmEncrypt(byte[] plaintext)
     {
         var key = GetOrCreateNonWindowsKey();
         var nonce = RandomNumberGenerator.GetBytes(AesNonceSizeBytes);
@@ -208,7 +350,7 @@ public static class ProtectedFileStore
         nonce.CopyTo(payload, 0);
         tag.CopyTo(payload, AesNonceSizeBytes);
         ciphertext.CopyTo(payload, AesNonceSizeBytes + AesTagSizeBytes);
-        return BuildEnvelope(NonWindowsAesGcmAlgorithm, payload);
+        return payload;
     }
 
     private static byte[] UnprotectWithNonWindowsAesGcm(ReadOnlySpan<byte> payload)
@@ -218,15 +360,12 @@ public static class ProtectedFileStore
 
         var key = GetOrCreateNonWindowsKey();
         var nonce = payload[..AesNonceSizeBytes];
-        var tag = payload.Slice(AesNonceSizeBytes, AesTagSizeBytes);
+        var tag = payload.Slice(AesNonceSizeBytes, AesNonceSizeBytes + AesTagSizeBytes);
         var ciphertext = payload[(AesNonceSizeBytes + AesTagSizeBytes)..];
         var plaintext = new byte[ciphertext.Length];
 
-        using (var aes = new AesGcm(key, AesTagSizeBytes))
-        {
-            aes.Decrypt(nonce, ciphertext, tag, plaintext);
-        }
-
+        using var aes = new AesGcm(key, AesTagSizeBytes);
+        aes.Decrypt(nonce, ciphertext, tag, plaintext);
         return plaintext;
     }
 

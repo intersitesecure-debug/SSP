@@ -38,10 +38,14 @@ This threat model covers the SSP licensing subsystem end to end:
 Out of scope (unchanged by licensing, per the plan §9): the enrollment/tunnel
 cryptography (`RsaCrypto`, AES-GCM, session keys), the patch-slot client
 mechanism, and the Windows service control contract. The enrollment OTT
-lifecycle is in scope only for the Phase 1 failed-Authentication-Code attempt
-limit described by T31; its cryptographic construction and wire protocol remain
-unchanged. Licensing never touches the wire protocol or the data plane; the
-client carries no licensing code.
+lifecycle is in scope only for the Phase 1/2 failed-Authentication-Code
+controls described by T31; its cryptographic construction and wire protocol
+remain unchanged. The AT-REST storage of the client identity key pair
+(`connections/{ConnectionId}/.cache.dat` / `.index.dat` / `.runtime.dat`) is in
+scope through T32 (roadmap Phase 3, M-2): the scope of the encrypted-at-rest
+envelope is a security boundary of this model, while the enrollment wire
+protocol that uses the key is unchanged. Licensing never touches the wire
+protocol or the data plane; the client carries no licensing code.
 
 ## 2. Assets and trust boundary
 
@@ -54,6 +58,7 @@ client carries no licensing code.
 | Activation OTT + 10-digit code | OTT signed into the certification; code hash signed into the certification; code plaintext only in the authority activation record | Code is 10 decimal digits with its SHA-256 signed into the certification; the server can only verify a code, never generate one; the OTT is single-use, consumed only after a successful match |
 | Authority activation record (`<licenseId>.json`) | Authority ceremony host, next to the private key | Plaintext authority secret (OTT + code); never in the repository, build, CI or any customer artifact |
 | Anti-rollback floor (`.license-state.dat`) | Same directory, on `ProtectedFileStore.ProtectedFileNames` | DPAPI LocalMachine envelope on Windows (AES-GCM fallback elsewhere); also records `ActivatedLicenseId`; can only *restrict* authorization, never grant it; corruption ⇒ `state_store_unavailable` ⇒ fail closed |
+| Client identity key pair (`.cache.dat` / `.index.dat` / `.runtime.dat` under `C:\Program Files\SSP\connections\{ConnectionId}\`) | Client product root, one directory per Server+Service connection | Encrypted-at-rest envelope with **DPAPI CurrentUser** scope on Windows (scope recorded in the envelope; T32): decryption requires the creating user's own DPAPI master key, so no other local account — the files themselves are world-readable under `C:\Program Files` — can recover the client private key; legacy LocalMachine client envelopes are re-wrapped to CurrentUser on first read; undecryptable material ⇒ load throws ⇒ spec §19 "local identity credential unavailable", never a silent identity regeneration |
 | Installation identity | Derived at runtime (`MachineGuid`) | Hashed + domain-separated (`SspLicensing.InstallationBindingPurposeTag`); raw value never leaves `SspInstallationIdentityProvider` |
 | Runtime authorization state | Per server process, `LicenseManager` under its own lock | Single authority, no cached verdicts anywhere (`LicensingCompositionTests` reflection check); `Valid → LockedDown` is sticky, cleared only by a valid artifact |
 | Usage counters (`_activeTunnels`/`_activeSessions`) | Per process, `SspRuntimeLicense` under `_admissionGate` | Atomic check-and-reserve in `AdmitTunnel()`; release exactly once via `SspTunnelAdmission.Dispose()` |
@@ -106,6 +111,7 @@ Each row: threat → surface → mitigation → **machine-checked by**.
 | T29 | Licensing activation bypass: guessing or replaying a code, or activating the wrong license | The licensing activation code is hashed with SHA-256 into the certification and compared constant-time; the persisted `ActivatedLicenseId` binds activation to exactly one license; a wrong code keeps `ActivationRequired` | `ActivationLifecycleTests`; `LicenseActivationTests` |
 | T30 | Offline activation-request forgery / OTT replay | The OTT is authority-generated 256-bit random, signed into the certification, and matched constant-time against the authority's own record; it is single-use and consumed only on a successful match | `LicenseAuthorityActivationTests`; `LicenseActivationTests.OttMatches_IsConstantTimeAndStrict` |
 | T31 | Brute-force the 10-digit client-enrollment Authentication Code by repeatedly reconnecting with a copied package's still-valid OTT | `.cache.dat` persists a failed-code counter per hashed OTT under the existing enrollment and cross-process configuration locks. Failures one and two retain the OTT; failure three removes both pending and legacy authorization for that hash, permanently invalidating every copy of the package. Logs emit stable, credential-free `Enrollment.AuthenticationCodeFailed` and `Enrollment.OTTRevokedAfterFailedAttempts` events. Counters and codes never enter the client or wire protocol | `F4_EnrollmentTests.WrongAuthenticationCode_BeforeLimit_PersistsAttemptAndKeepsOttValid`; `ThirdWrongAuthenticationCode_RevokesOttAndEmitsSecurityEvents`; `CorrectAuthenticationCode_AfterTwoFailures_EnrollsSuccessfully`; `CorrectAuthenticationCode_AfterThreeFailures_CannotEnrollSamePackage` |
+| T32 | **Extract the client identity private key on the customer machine** and impersonate the enrolled client: the key files live under world-readable `C:\Program Files\SSP\connections\{ConnectionId}\` and were protected with DPAPI **LocalMachine** scope, which — per MS-CryptProtectData — "any user on the computer … can use CryptUnprotectData to decrypt" with the public in-source entropy string; a non-admin local user could copy `.cache.dat`, unprotect it in five lines of code, and sign future-authorization challenges exactly like the real client (`ServerProtocol` verifies against the enrolled public key) | Client connection files (`.cache.dat` private key, `.index.dat` public key, `.runtime.dat` profile) are now written with DPAPI **CurrentUser** scope (Phase 3 / M-2): the scope is recorded in the SSP-EAR1 envelope (algorithm byte 3 on Windows; byte 4 scope marker on the non-Windows test fallback) and is **authoritative for decryption**, so no other local account can recover the key material even though the file bytes remain readable. Server-side service files keep LocalMachine (the LocalSystem gateway service must read what elevated setup wrote — scope split is machine-checked). Pre-existing installs are upgraded in place: legacy plaintext client keys migrate directly into the CurrentUser envelope, and old LocalMachine client envelopes decrypt for their owner and are re-wrapped to CurrentUser on first read (best effort; identity, fingerprint and enrollment state unchanged). Undecryptable material (foreign user/machine, corruption, lost profile) fails closed: the load throws, the files stay byte-identical, and no replacement identity is generated (spec §19). The enrollment wire protocol, OTT/Authentication-Code flow, RSA key construction, and offline licensing architecture are unchanged | `ClientIdentityKeyProtectionTests.ClientConnectionFiles_AreProtectedWithCurrentUserScope`; `ServerSideServiceFiles_RemainProtectedWithLocalMachineScope`; `LegacyLocalMachineClientFiles_AreRewrappedToCurrentUserScope_OnFirstLoad`; `LegacyPlaintextClientKeys_MigrateDirectlyToCurrentUserScope`; `ForeignKeyMaterial_FailsClosed_WithoutRegeneratingIdentity`; `CrossScopeRead_UsesEnvelopeRecordedScope_AndRewrapsToRequestedScope` |
 
 ## 5. Build-time trust decisions (recorded here, as the blueprint requires)
 
@@ -218,6 +224,29 @@ possible without behavioural change; the reference audit rated it Low.
 * **A revoked enrollment OTT requires reprovisioning.** Three operator typing
   mistakes permanently invalidate that client package by design; recovery is
   to provision a new package/OTT through the existing offline setup workflow.
+* **The client identity is bound to the creating user's DPAPI profile (T32
+  fix).** A CurrentUser-scoped key becomes unrecoverable when the user account
+  is deleted or its password changed such that the old DPAPI master key is
+  unreachable; the connection then fails closed ("local identity credential
+  unavailable") and must be re-provisioned offline with a new OTT/package.
+  This is the accepted cost of user-scoped DPAPI — the alternative
+  (LocalMachine) let any local account extract the private key.
+* **Client identity files remain world-readable in their ENCRYPTED form.**
+  `C:\Program Files\SSP\connections\{ConnectionId}\` inherits the default
+  Program Files ACL (Read for "Users"); T32's boundary is the DPAPI
+  CurrentUser master key, not the file ACL. Recovering the key still requires
+  defeating that user's DPAPI master key (memory-inspection/debugging class),
+  which the model already places out of scope for software-only protection
+  (§7.4, §9).
+* **Server-side service files keep the LocalMachine scope.** The gateway
+  Windows Service runs as LocalSystem and must read what elevated setup
+  wrote, so `.cache.dat`/`.sysdata.bin`/`.runtime.dat`/`.index.dat`/
+  `.license-state.dat` under `services\{ApplicationName}\` stay LocalMachine
+  scoped; any local account on a *server* machine could therefore decrypt the
+  server private key. Phase 3's scope was the client identity key; server
+  hosts are service-dedicated machines where untrusted local logins are not
+  assumed (the standard premise for machine-scoped DPAPI). Revisit this
+  decision if an untrusted local account is ever introduced on a server host.
 * **Feature/limit vocabularies are host conventions**: the library validates
   shape and normalization; `SspLicensing.Features`/`Limits` define what
   `rdp`/`ssh`/`web`/`sql` and the limit names mean for SSP, and
@@ -232,6 +261,9 @@ possible without behavioural change; the reference audit rated it Low.
 | Clock rollback to replay an expired license window | Partially mitigated (floor + window checks); fully eliminating it needs trusted time, which an offline product cannot assume |
 | DPAPI LocalMachine scope means any local process with the right context could read the floor | The floor can only *restrict*; confidentiality of it is irrelevant to the security property |
 | Event-log writes are best-effort | A logging failure must never mask the licensing verdict; the fail-closed behavior does not depend on the log |
+| Client identity files are readable (encrypted) by every local user; only the DPAPI CurrentUser master key blocks decryption (T32) | File-ACL hardening is not reliable for a desktop app whose state lives in `C:\Program Files`; the master key IS the boundary. Defeating a user's DPAPI master key is memory-inspection/debugging-class, already out of scope (§7.4) |
+| Client identity loss on user-profile loss / password change (T32 fix) | Inherent to user-scoped DPAPI; the alternative scope allowed arbitrary local extraction of the private key. Recovery is the existing offline re-provisioning workflow (new OTT/package) |
+| Server-side LocalMachine scope exposes the server private key to local accounts on a server machine | Service-dedicated host assumption (no untrusted local logins); changing it would break the LocalSystem service's access to what elevated setup wrote. Recorded for re-evaluation if that assumption changes |
 
 ## 10. Sign-off
 
@@ -239,6 +271,7 @@ possible without behavioural change; the reference audit rated it Low.
 | --- | --- |
 | Scope reviewed | §1–§9, source-evidence based, on branch `arena/01a06c90-ssp` (2026-09-04) |
 | v2 extension reviewed | Two-level certified chain (v2 artifacts), per-license leaf keys, offline activation (OTT + 10-digit code), `OrganizationOrPersonName`/`ComputerName` identity fields; threats T25–T30 added; on branch `arena/01a06e0b-ssp` (2026-09-05) |
+| Client key scope reviewed (Phase 3 / M-2) | T32 added: client connection files moved from DPAPI LocalMachine to CurrentUser scope (envelope-recorded, envelope-authoritative, in-place re-wrap of pre-existing installs, fail-closed on foreign material); server files keep LocalMachine; asset table, limitations and residual risks updated; on branch `arena/01a07138-ssp` (2026-09-05). Note: machine-checked by the new `ClientIdentityKeyProtectionTests` suite; automated execution pending a .NET 8 SDK environment (roadmap Step 3) |
 | Enforcement seams verified | EP0a/EP0b (`SetupEngine`), EP1 (`CreateForService` in `Program.RunServiceModeAsync` + `SspWindowsService.OnStart`), EP2 (enrollment, pre-OTT), EP3 (single choke point, post-authentication), EP-T (one revalidation timer) |
 | Machine-checked mitigations | §4 table: every row cites a test that exists in the repository and runs in the standard test suites |
 | Dev/fail-closed posture | Intentional; no production trust anchor or private key exists in, or can enter, this repository (see §5 and `TRUST_ANCHOR_KEY_CEREMONY.md`) |

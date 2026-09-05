@@ -548,9 +548,10 @@ public sealed class ClientServiceBundle
     ///
     /// The destination pair is protected at rest: it is written through
     /// PemStore (the same ProtectedFileStore mechanism the server-side
-    /// key files use), so the legacy plaintext PEM never lands on disk
-    /// inside the connection directory - the files are created directly
-    /// in the encrypted envelope and are decrypted transparently by
+    /// key files use, in the client's CurrentUser scope - Phase 3 /
+    /// M-2), so the legacy plaintext PEM never lands on disk inside the
+    /// connection directory - the files are created directly in the
+    /// encrypted envelope and are decrypted transparently by
     /// ClientRuntime on load.
     /// </summary>
     private static bool MigrateLegacyKeys(string sourceDir, string destDir)
@@ -567,10 +568,17 @@ public sealed class ClientServiceBundle
 
         // Synchronous context (PrepareIdentityDirectory): the protected
         // store's async I/O is completed inline, exactly like the
-        // Windows service host does for .cache.dat.
-        PemStore.SavePrivateKeyAsync(Path.Combine(destDir, destNames[0]), privPem)
+        // Windows service host does for .cache.dat. CurrentUser scope
+        // (Phase 3 / M-2): the migrated legacy keys belong to the
+        // interactive client user and must stay unreadable to every
+        // other account on the machine.
+        PemStore.SavePrivateKeyAsync(
+                Path.Combine(destDir, destNames[0]), privPem,
+                ClientInstallPaths.ClientConnectionProtectionScope)
             .GetAwaiter().GetResult();
-        PemStore.SavePublicKeyAsync(Path.Combine(destDir, destNames[1]), pubPem)
+        PemStore.SavePublicKeyAsync(
+                Path.Combine(destDir, destNames[1]), pubPem,
+                ClientInstallPaths.ClientConnectionProtectionScope)
             .GetAwaiter().GetResult();
 
         return true;
