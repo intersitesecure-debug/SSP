@@ -227,25 +227,25 @@ public sealed class LicenseValidator
                 // 1d — certification time window (the period the leaf key may sign). Checked
                 // here so an expired certification cannot authenticate any payload, however
                 // current the payload's own window is.
-                var now = _clock.UtcNow;
-                if (now < certification.NotBefore)
+                var certNow = _clock.UtcNow;
+                if (certNow < certification.NotBefore)
                 {
                     return Fail(
                         LicenseState.NotYetValid,
                         LicenseReasons.CertificationNotYetValid,
-                        $"Key certification is not valid before {FormatTime(certification.NotBefore)} (now {FormatTime(now)}).",
+                        $"Key certification is not valid before {FormatTime(certification.NotBefore)} (now {FormatTime(certNow)}).",
                         LicenseSecurityEventType.LicenseValidationFailed,
                         payload,
                         artifact.ArtifactVersion,
                         certification: certification);
                 }
 
-                if (now >= certification.ExpiresAt)
+                if (certNow >= certification.ExpiresAt)
                 {
                     return Fail(
                         LicenseState.Expired,
                         LicenseReasons.CertificationExpired,
-                        $"Key certification expired at {FormatTime(certification.ExpiresAt)} (now {FormatTime(now)}).",
+                        $"Key certification expired at {FormatTime(certification.ExpiresAt)} (now {FormatTime(certNow)}).",
                         LicenseSecurityEventType.LicenseExpired,
                         payload,
                         artifact.ArtifactVersion,

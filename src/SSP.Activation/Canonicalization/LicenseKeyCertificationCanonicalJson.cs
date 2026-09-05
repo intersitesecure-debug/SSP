@@ -18,8 +18,13 @@ namespace SSP.Activation;
 ///   - GUIDs: lowercase hyphenated "D" form (same convention as the license payload).
 ///   - Timestamps: RFC 3339 UTC, fixed yyyy-MM-ddTHH:mm:ss.fffffffZ (seven fractional
 ///     digits), converted to UTC first (same convention as the license payload).
-///   - publicKeySpkiDer: base64url of the DER SubjectPublicKeyInfo (standard encoding,
-///     unpadded).
+///   - publicKeySpkiDer: base64url (RFC 4648 §5, unpadded) of the DER
+///     SubjectPublicKeyInfo. base64url — not standard base64 — because the
+///     certification JSON is itself base64url-decoded by
+///     <see cref="LicenseKeyCertificationCodec"/> (which rejects '+', '/' and '=').
+///     Utf8JsonWriter.WriteBase64StringValue must NOT be used here: it emits
+///     standard base64 and would produce certifications that fail closed on
+///     decode for almost every real RSA key.
 ///   - activationOtt: base64url string, present only when non-null (activation licenses).
 ///   - activationCodeHash: lowercase-hex SHA-256 string, present only when non-null.
 /// </summary>
@@ -70,7 +75,7 @@ public static class LicenseKeyCertificationCanonicalJson
         writer.WriteStringValue(certification.ProductId.ToString("D"));
 
         writer.WritePropertyName("publicKeySpkiDer");
-        writer.WriteBase64StringValue(certification.PublicKeySpkiDer);
+        writer.WriteStringValue(Base64Url.Encode(certification.PublicKeySpkiDer));
 
         writer.WriteEndObject();
         writer.Flush();
