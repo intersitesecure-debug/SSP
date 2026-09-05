@@ -13,6 +13,7 @@
 // are four different SSP identities even when the client is called
 // "Client01" in all four cases.
 
+using System.Security.Cryptography;
 using System.Text.Json;
 using SSP.Core.Crypto;
 using SSP.Core.IO;
@@ -215,17 +216,24 @@ public sealed class ClientConnectionState
     /// the same ProtectedFileStore mechanism as the server-side state
     /// files, and a legacy plaintext profile is migrated into the
     /// encrypted envelope as a side effect of the read (the plaintext
-    /// no longer remains on disk).
+    /// no longer remains on disk). The scope is CurrentUser (Phase 3 /
+    /// M-2) because this profile belongs to the interactive client
+    /// user: an undecryptable profile (another user's file, lost user
+    /// profile, corruption) is reported as "no profile" by the caller
+    /// and, for the key pair, fails closed at the PemStore layer before
+    /// any enrollment decision is made.
     /// </summary>
-    public static ClientConnectionState? TryLoad(string connectionDirectory)
+    public static ClientConnectionState? TryLoad(
+        string connectionDirectory,
+        DataProtectionScope scope = ClientInstallPaths.ClientConnectionProtectionScope)
     {
         var path = PathIn(connectionDirectory);
         if (!File.Exists(path))
             return null;
         try
         {
-            var read = ProtectedFileStore.ReadTextAsync(path).GetAwaiter().GetResult();
-            ProtectedFileStore.MigratePlaintextAsync(path, read).GetAwaiter().GetResult();
+            var read = ProtectedFileStore.ReadTextAsync(path, scope).GetAwaiter().GetResult();
+            ProtectedFileStore.MigratePlaintextAsync(path, read, scope).GetAwaiter().GetResult();
             return JsonSerializer.Deserialize<ClientConnectionState>(
                 read.Text, JsonOptions.Default);
         }
@@ -238,12 +246,18 @@ public sealed class ClientConnectionState
     /// <summary>
     /// Persist the profile. The JSON is written through
     /// ProtectedFileStore, so .runtime.dat always lands on disk as an
-    /// encrypted envelope (never plaintext).
+    /// encrypted envelope (never plaintext). The scope is CurrentUser
+    /// (Phase 3 / M-2): the profile lives next to the client identity
+    /// and is bound to the same interactive user as the key pair.
     /// </summary>
-    public static Task SaveAsync(string connectionDirectory, ClientConnectionState state, CancellationToken ct = default)
+    public static Task SaveAsync(
+        string connectionDirectory,
+        ClientConnectionState state,
+        DataProtectionScope scope = ClientInstallPaths.ClientConnectionProtectionScope,
+        CancellationToken ct = default)
     {
         var json = JsonSerializer.Serialize(state, JsonOptions.Default);
-        return ProtectedFileStore.WriteTextAsync(PathIn(connectionDirectory), json, ct);
+        return ProtectedFileStore.WriteTextAsync(PathIn(connectionDirectory), json, scope, ct);
     }
 
     /// <summary>Build the profile for a connection from its config.</summary>
