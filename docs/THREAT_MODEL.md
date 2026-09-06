@@ -244,12 +244,15 @@ possible without behavioural change; the reference audit rated it Low.
 * **One transaction among cooperating stores.** `ILicenseTimeStateLock` is an
   optional host-store seam; `SspLicenseStateStore` implements it with a
   synchronous, thread-reentrant exclusive `.license-state.dat.lock` lease
-  across read/sample/merge/write/readback. Acquisition uses a five-second
-  elapsed-time bound, not wall-clock UTC. Time-only updates cannot overwrite a
-  cooperating acceptance/activation transaction. An empty stale lock file is
-  not a held lease and must not be deleted. Replacement stores without this
-  seam provide only shared-instance, in-process synchronization; they are not
-  substitutes for SSP's durable production store.
+  across read/sample/merge/write/readback. Acquisition uses a thirty-second
+  elapsed-time bound, not wall-clock UTC: the bound is far above any
+  legitimate single-holder duration, so concurrent checkpoint bursts
+  serialize and succeed, while a holder that never releases within the bound
+  makes the waiter fail closed instead of hang. Time-only updates cannot
+  overwrite a cooperating acceptance/activation transaction. An empty stale
+  lock file is not a held lease and must not be deleted. Replacement stores
+  without this seam provide only shared-instance, in-process synchronization;
+  they are not substitutes for SSP's durable production store.
 * **Recovery never resets history.** Inspect the licensing reason/security
   event and the primary/witness paths reported by `--license-status`; repair
   storage permissions, space and lease availability as needed. Correct host

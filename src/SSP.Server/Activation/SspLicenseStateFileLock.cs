@@ -8,9 +8,21 @@ namespace SSP.Server.Activation;
 /// Save also take it, so a time-only update cannot erase concurrent activation or
 /// renewal state. Like ServiceConfigFileLock, this uses a local exclusive file;
 /// unlike that async API, its bounded wait uses elapsed time, never wall-clock UTC.
+///
+/// The acquisition bound (default thirty seconds) is a security decision, not a
+/// performance hint: an enforcement that cannot obtain the lease denies instead of
+/// hanging, so a stuck holder can never block every admission forever. The bound
+/// is deliberately much larger than any legitimate hold (one read/sample/merge/
+/// save/readback transaction, including its bounded atomic-write retries), so
+/// bursts of legitimate concurrent checkpoints serialize through the lease and
+/// succeed instead of failing closed. Only after the bound expires does a waiter
+/// conclude that the state is unavailable.
 /// </summary>
 internal static class SspLicenseStateFileLock
 {
+    /// <summary>Default acquisition bound, in elapsed time (never wall-clock UTC).</summary>
+    internal static readonly TimeSpan DefaultAcquisitionTimeout = TimeSpan.FromSeconds(30);
+
     private static readonly ThreadLocal<Dictionary<string, HeldLock>> Held = new(() =>
         new Dictionary<string, HeldLock>(OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal));
@@ -26,7 +38,7 @@ internal static class SspLicenseStateFileLock
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var wait = timeout ?? TimeSpan.FromSeconds(5);
+        var wait = timeout ?? DefaultAcquisitionTimeout;
         var elapsed = Stopwatch.StartNew();
         while (true)
         {
@@ -40,6 +52,8 @@ internal static class SspLicenseStateFileLock
             }
             catch (IOException) when (elapsed.Elapsed < wait)
             {
+                // A short poll interval keeps handoff latency low while a
+                // legitimate holder finishes; an attempt is only a file open.
                 Thread.Sleep(10);
             }
         }
