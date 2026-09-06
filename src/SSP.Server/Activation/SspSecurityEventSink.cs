@@ -185,12 +185,12 @@ public sealed class SspSecurityEventSink : ISecurityEventSink
 /// The mapping is part of the operational contract:
 ///   * ids are never renumbered and severity is never raised or lowered for an
 ///     existing event type - operators may bind alerting to these ids;
-///   * the library appends enum members only, and the exhaustive switch below
-///     fails compilation (CS8509) when a new event type appears, which forces
-///     this taxonomy to be reviewed before the new type can ship.
+///   * the library appends enum members only. The taxonomy tests pin the full
+///     vocabulary and require an explicit severity for each defined type;
+///     the fallback below is defensive for undefined numeric enum values.
 ///
 /// Event ids: <see cref="EventIdBase"/> + the enum value, i.e.
-/// LicenseLoaded = 4601 ... ProtectedOperationDenied = 4611. The base sits
+/// LicenseLoaded = 4601 ... TimeIntegrityUnavailable = 4617. The base sits
 /// outside the system-defined range so SSP licensing events can never collide
 /// with SCM / ServiceBase / .NET runtime entries. The source name is
 /// "SSP.Server", the same Application-log source ServiceDiagnostics writes
@@ -201,7 +201,7 @@ public sealed class SspSecurityEventSink : ISecurityEventSink
 ///     lockdown cleared, a newer artifact superseding an older one.
 ///   Warning     - every operator-actionable denial state: validation failure,
 ///     invalid signature, expiry, installation binding failure, revocation,
-///     lockdown activation and every protected-operation denial.
+///     lockdown activation, state/time integrity failure and protected-operation denial.
 ///   Error       - deliberately never used. The sink contract is best-effort
 ///     and a licensing denial is an operational state, not a crash; Error-level
 ///     service failures (including SspActivationException at startup) are
@@ -226,9 +226,9 @@ internal static class LicensingEventLogTaxonomy
 
     /// <summary>
     /// Operator-meaningful Windows event-log entry type for a licensing
-    /// security event type. Exhaustive by construction: adding a member to
-    /// <see cref="LicenseSecurityEventType"/> fails compilation until this
-    /// taxonomy decides the new member's severity.
+    /// security event type. The taxonomy tests require an explicit reviewed
+    /// severity for every member of <see cref="LicenseSecurityEventType"/>;
+    /// unknown numeric values default to Warning.
     /// </summary>
     public static System.Diagnostics.EventLogEntryType EntryTypeFor(LicenseSecurityEventType eventType) => eventType switch
     {
@@ -247,6 +247,8 @@ internal static class LicensingEventLogTaxonomy
         LicenseSecurityEventType.LicenseActivated => System.Diagnostics.EventLogEntryType.Information,
         LicenseSecurityEventType.LicenseStateRollbackDetected => System.Diagnostics.EventLogEntryType.Warning,
         LicenseSecurityEventType.LicenseStateDeletionRecovered => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.ClockRollbackDetected => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.TimeIntegrityUnavailable => System.Diagnostics.EventLogEntryType.Warning,
         _ => System.Diagnostics.EventLogEntryType.Warning,
     };
 }

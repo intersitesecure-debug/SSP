@@ -12,16 +12,17 @@ internal sealed class NullInstallationIdentityProvider : IInstallationIdentityPr
 /// Centralized validation pipeline:
 /// <code>
 ///   load → parse → schema → signature → status/revocation → product → installation
-///        → not-before → expiration → anti-rollback → VALID
+///        → monotonic UTC checkpoint / both validity windows → anti-rollback → activation → VALID
 /// </code>
 /// Every failure produces an explicit, deterministic failure state. The pipeline never
 /// fails open: missing input, malformed data, infrastructure errors or unexpected
 /// exceptions all result in a non-valid result, and protected operations stay denied.
 /// </summary>
 /// <remarks>
-/// The validator is stateless with respect to authorization (it only reads the state
-/// store for the anti-rollback floor) and can be used standalone (e.g. by activation
-/// tooling) as well as through <see cref="LicenseManager"/>.
+/// The validator is stateless with respect to authorization and can be used standalone
+/// or through LicenseManager. Phase 6 also persists restrictive time observations
+/// (including expiration), never acceptance/activation. A standalone validation cannot
+/// forget observed expiry between calls simply because no manager applies the result.
 /// </remarks>
 public sealed class LicenseValidator
 {
@@ -32,6 +33,7 @@ public sealed class LicenseValidator
     private readonly ILicenseStateStore _stateStore;
     private readonly ILicenseRevocationChecker _revocationChecker;
     private readonly ISecurityEventSink _eventSink;
+    private readonly LicenseTimeIntegrity _time;
 
     public LicenseValidator(
         LicenseTrustAnchor trustAnchor,
@@ -59,7 +61,12 @@ public sealed class LicenseValidator
         _stateStore = stateStore ?? new InMemoryLicenseStateStore();
         _revocationChecker = revocationChecker ?? NullLicenseRevocationChecker.Instance;
         _eventSink = eventSink ?? NullSecurityEventSink.Instance;
+        _time = new LicenseTimeIntegrity(_clock, _stateStore, _eventSink);
     }
+
+    // The manager shares this guard, so concurrent validations, Apply and Authorize
+    // retain the same in-process high-water mark even after a persistence failure.
+    internal LicenseTimeIntegrity TimeIntegrity => _time;
 
     /// <summary>
     /// Runs the full validation pipeline against an artifact. Null/empty input yields an
@@ -85,7 +92,7 @@ public sealed class LicenseValidator
                 LicenseSecurityEventType.LicenseValidationFailed);
         }
 
-        _eventSink.Report(MakeEvent(
+        _time.Report(MakeEvent(
             LicenseSecurityEventType.LicenseLoaded,
             LicenseState.Unknown,
             artifact.Payload.LicenseId,
@@ -224,33 +231,9 @@ public sealed class LicenseValidator
                         certification: certification);
                 }
 
-                // 1d — certification time window (the period the leaf key may sign). Checked
-                // here so an expired certification cannot authenticate any payload, however
-                // current the payload's own window is.
-                var certNow = _clock.UtcNow;
-                if (certNow < certification.NotBefore)
-                {
-                    return Fail(
-                        LicenseState.NotYetValid,
-                        LicenseReasons.CertificationNotYetValid,
-                        $"Key certification is not valid before {FormatTime(certification.NotBefore)} (now {FormatTime(certNow)}).",
-                        LicenseSecurityEventType.LicenseValidationFailed,
-                        payload,
-                        artifact.ArtifactVersion,
-                        certification: certification);
-                }
-
-                if (certNow >= certification.ExpiresAt)
-                {
-                    return Fail(
-                        LicenseState.Expired,
-                        LicenseReasons.CertificationExpired,
-                        $"Key certification expired at {FormatTime(certification.ExpiresAt)} (now {FormatTime(certNow)}).",
-                        LicenseSecurityEventType.LicenseExpired,
-                        payload,
-                        artifact.ArtifactVersion,
-                        certification: certification);
-                }
+                // Phase 6 evaluates the certification window together with
+                // the payload window, from one protected time observation below.
+                // Both RSA-PSS signatures still MUST verify before acceptance.
             }
 
             bool signatureValid;
@@ -384,47 +367,24 @@ public sealed class LicenseValidator
             }
         }
 
-        // Stage 5 — time window (UTC; ExpiresAt is exclusive).
-        var now = _clock.UtcNow;
-        if (now < payload.NotBefore)
+        var license = new License
         {
-            return Fail(
-                LicenseState.NotYetValid,
-                LicenseReasons.NotYetValid,
-                $"License is not valid before {FormatTime(payload.NotBefore)} (now {FormatTime(now)}).",
-                LicenseSecurityEventType.LicenseValidationFailed,
-                payload,
-                artifact.ArtifactVersion);
-        }
+            Payload = payload,
+            SignatureAlgorithm = artifact.SignatureAlgorithm,
+            ArtifactVersion = artifact.ArtifactVersion,
+            Certification = certification
+        };
 
-        if (now >= payload.ExpiresAt)
-        {
-            return Fail(
-                LicenseState.Expired,
-                LicenseReasons.Expired,
-                $"License expired at {FormatTime(payload.ExpiresAt)} (now {FormatTime(now)}).",
-                LicenseSecurityEventType.LicenseExpired,
-                payload,
-                artifact.ArtifactVersion);
-        }
+        // Stage 5 — Phase 6 time integrity + BOTH UTC validity windows. The
+        // observation is checkpointed even if a window is expired; recording only
+        // successful validations would allow an observed expiration to be revived.
+        var observation = _time.Observe(license,
+            (record, now) => (record, _time.CheckWindow(license, now)));
+        if (observation.Failure is { } timeFailure)
+            return timeFailure;
 
         // Stage 6 — anti-rollback (state store can only restrict, never grant).
-        LicenseStateRecord? stored;
-        try
-        {
-            stored = _stateStore.Load();
-        }
-        catch (Exception ex)
-        {
-            return Fail(
-                LicenseState.Unknown,
-                LicenseReasons.StateStoreUnavailable,
-                $"License state store is unavailable: {ex.GetType().Name}",
-                LicenseSecurityEventType.LicenseValidationFailed,
-                payload,
-                artifact.ArtifactVersion);
-        }
-
+        var stored = observation.Record;
         if (stored is not null && payload.SequenceNumber < stored.HighestAcceptedSequenceNumber)
         {
             return Fail(
@@ -454,14 +414,6 @@ public sealed class LicenseValidator
                 certification: certification);
         }
 
-        var license = new License
-        {
-            Payload = payload,
-            SignatureAlgorithm = artifact.SignatureAlgorithm,
-            ArtifactVersion = artifact.ArtifactVersion,
-            Certification = certification
-        };
-
         var validEvent = MakeEvent(
             LicenseSecurityEventType.LicenseValidated,
             LicenseState.Valid,
@@ -469,13 +421,10 @@ public sealed class LicenseValidator
             LicenseReasons.Ok,
             "License validated successfully.");
 
-        _eventSink.Report(validEvent);
+        _time.Report(validEvent);
 
         return LicenseValidationResult.Valid(license, validEvent);
     }
-
-    private static string FormatTime(DateTimeOffset value)
-        => value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
     private LicenseSecurityEvent MakeEvent(
         LicenseSecurityEventType eventType,
@@ -486,7 +435,7 @@ public sealed class LicenseValidator
         => new()
         {
             EventType = eventType,
-            OccurredAtUtc = _clock.UtcNow,
+            OccurredAtUtc = _time.EventTimeUtc,
             State = state,
             LicenseId = licenseId,
             ReasonCode = reasonCode,
@@ -516,7 +465,7 @@ public sealed class LicenseValidator
         }
 
         var securityEvent = MakeEvent(eventType, state, payload?.LicenseId, reasonCode, detail);
-        _eventSink.Report(securityEvent);
+        _time.Report(securityEvent);
 
         return LicenseValidationResult.Fail(state, reasonCode, detail, license, securityEvent);
     }

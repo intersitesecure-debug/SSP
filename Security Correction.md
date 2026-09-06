@@ -1,6 +1,6 @@
 # SSP Security Corrections Roadmap
 
-**Status:** Active — Phases 1–4 complete and merged (full suite 685/685 passed on the merged branch); Phase 5 implemented (Step 7), awaiting automated validation in a .NET 8 SDK environment
+**Status:** Active — Phase 6 implementation, test source and documentation added (Step 8); build and full-suite execution blocked by the missing .NET SDK. Phase 6 is not Complete.
 **Authority:** This document is the source of truth for SSP security hardening work.  
 **Execution order:** Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6  
 **Last updated:** 2026-09-06
@@ -37,7 +37,9 @@
 | 3 | Client Private Key Protection (M-2) | Complete | Complete (self-review) | Passed (658/658 post-merge) | Complete |
 | 4 | License State Anti-Rollback Protection (M-3) | Complete — merged; full suite 685/685 passed | Complete (self-review) | Passed (685/685 post-merge) | Complete |
 | 5 | Runtime Code Integrity Protection (M-4) | In progress — implementation complete (Step 7) | Complete (self-review) | Written (new `RuntimeCodeIntegrityTests`); execution blocked in current environment — `dotnet` unavailable | Complete |
-| 6 | Clock Rollback Protection (M-6) | Not started | Not started | Not started | Not started |
+| 6 | Clock Rollback Protection (M-6) | In progress — Step 8; validation blocked | Static self-review performed; compiler/runtime validation pending | Three new suites written; restore/build/all tests blocked (`dotnet` unavailable) | Updated (T36, migration/recovery and residuals) |
+
+**Phase 6 baseline provenance:** the user reports Phases 1–5 merged with **697/697** tests passing. That is supplied baseline evidence, not a result reproduced in this workspace or a result for Phase 6. Earlier phase records are retained; this step does not reopen or reimplement those phases.
 
 ## Step-by-step change log
 
@@ -99,6 +101,16 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 - **Affected files:** `src/SSP.Server/Runtime/EnrollmentStateWitness.cs` (new); `src/SSP.Server/Runtime/ServerProtocol.cs`; `tests/SSP.Tests/EnrollmentStateAntiRollbackTests.cs` (new); `tests/SSP.Tests/Helpers/EnrollmentCooldown.cs` (witness-aware simulated clock change); `docs/THREAT_MODEL.md`; `Security Correction.md`.
 - **Tests performed:** `dotnet test` — **blocked before execution**: `dotnet: command not found` in this environment. `git diff --check` — passed. Static verification: the effective-count formula `max(config-counter, witnessed+1)` was re-derived against the normal, crashed-witness-lag and post-rollback sequences (normal flow values are identical to pre-Phase-4 in every non-rollback case, so the Phase 1/2 F4 assertions hold unchanged: failure 1 → 1, failure 2 → 2, failure 3 → revoked; after a counter rollback to 0 with 2 witnessed failures, the next wrong code yields max(1, 3) = 3 → revoked); the pre-check runs after the OTT/config match and before signature verification, code generation and the EP2 licensing gate (no licensing-state leak, no behavior change for unknown OTTs); the witness stores only hashed OTT keys, counts, ISO timestamps and booleans (no OTT plaintext, code, key or fingerprint — same credential-free class as the Phase 1/2 events). Automated test status remains Blocked in this environment.
 - **Remaining risks:** An administrator who restores BOTH the service directory AND the witness tree defeats the enrollment memory too (the same coordinated-rollback residual as the license state). A crash between the config and witness writes leaves the witness one step behind (safe direction; the next failure max-merges). Host-clock changes still shift cooldowns (Phase 6).
+
+### Step 8 — Phase 6 implementation: protected local UTC checkpoint
+
+- **Status:** In progress; implementation, tests and documentation written. Build/full-suite execution is blocked, so this is **not** a completion or release sign-off.
+- **What changed:** Added versioned monotonic local UTC history to the license state and existing protected witness; strict rollback detection; required checkpoint persistence before authorization; live checks at authorization and activation as well as validation; single-sample certification/payload window checks; safe Warning events 4616/4617. A local synchronous file lease covers read/sample/merge/write/readback so time-only saves preserve concurrent renewal/activation bookkeeping. Offline operation, RSA-PSS, signed artifact formats and earlier-phase enrollment/code-integrity mechanisms are unchanged.
+- **Affected files:** The activation manager, validator, time helper, state/reason/event models; native license store, witness, file lease and event taxonomy; three new clock-rollback test files and taxonomy assertions; this roadmap and `docs/THREAT_MODEL.md`. Exact paths and coverage appear in the Phase 6 Step 8 record below.
+- **Tests performed:** `git diff --check` passed. Tree-sitter C# syntax parsing of all 14 changed/new C# files found no syntax errors (not compilation). Full-solution restore, build, unfiltered tests and the normal embedded build each stopped before execution with `dotnet: command not found` (exit 127). No .NET test result is claimed. Official SDK/NuGet HTTPS attempts also failed with `SSL_ERROR_SYSCALL`; a .NET SDK and restored packages remain required.
+- **Code review:** Static self-review of lock ordering, migration, one-sample window checks, readback, persist-before-Valid, partial writes, event privacy and prior-phase boundaries. Compiler, analyzer and runtime validation remain pending.
+- **Threat model update:** T36 added; time-state assets, admission checks, migration/recovery, strict-write availability cost and offline residuals recorded.
+- **Remaining risks:** Local time history is not trusted absolute UTC. First-use/unobserved/frozen time and coordinated loss/rollback of all history remain limitations; legitimate backward corrections and large forward jumps can deny service. Both protected writes are required for licensing, but two file writes are not a power-loss-atomic transaction. See the Phase 6 record and threat model §7.1/§9.
 
 ---
 
@@ -350,11 +362,11 @@ Evaluate:
 
 **Goal:** Prevent system clock rollback from bypassing expiration validation.
 
-**Phase status:** Not started  
-**Current step:** None  
-**Code review:** Not started  
-**Automated tests:** Not started  
-**Threat model update:** Not started
+**Phase status:** In progress — implementation written; automated validation blocked
+**Current step:** Step 8 — full build and all tests must execute before completion
+**Code review:** Static self-review performed; compiler/analyzer/runtime validation pending
+**Automated tests:** Written; execution blocked (`dotnet` unavailable, exit 127)
+**Threat model update:** Updated for Phase 6 (T36 and explicit limitations); no completion sign-off yet
 
 ### Required implementation
 
@@ -371,15 +383,70 @@ Evaluate:
 
 ### Step completion record
 
-For each Phase 6 step, add a subsection here containing:
+#### Step 8 — Monotonic UTC history, mandatory protected witness and live enforcement
 
-- **Status:**
+- **Status:** Implementation/test source/docs added on `arena/01a07576-ssp`; **not Complete**, because no compiler or .NET test has executed here.
 - **What changed:**
-- **Affected files:**
-- **Tests performed and results:**
-- **Code review:**
-- **Threat model update:**
-- **Remaining risks:**
+  - `ClockStateVersion = 1` and `LastObservedUtc` distinguish initialized history from legacy records (version 0). The lower bound is the maximum of the primary, witness, legacy `LastValidatedUtc` and remembered in-process time. A UTC observation below that bound fails closed (`clock_rollback_detected`); equality and UTC-equivalent offset changes are allowed. There is no tolerance/grace period.
+  - Both signed validity windows use the same captured UTC after the RSA-PSS signatures and bindings pass. An observation of expiration or not-yet-valid time is persisted as **restrictive time only**, not license acceptance or activation. An expired artifact cannot become valid by rewinding after its expiration was checkpointed.
+  - Validation, pre-publication `Apply`, pending activation and every authorization of a currently valid license use the shared guard. Acceptance/checkpoint writes finish before publishing Valid. New service/enrollment/feature/session/tunnel decisions do not wait for the periodic timer to detect time failure; policy evaluation requires the manager to remain Valid, so a later failed/missing reload cannot hide a time denial by changing its diagnostic reason. Already-admitted tunnels retain the existing release semantics.
+  - The optional `ILicenseTimeStateLock` seam leaves `ILicenseStateStore` unchanged. SSP's reentrant `.license-state.dat.lock` lease serializes the complete read/sample/merge/save/readback across store instances/processes; its five-second acquisition bound uses elapsed time, not UTC. The empty lock file is never deleted. Replacement stores without this seam are synchronized only when callers share the same instance.
+  - The existing out-of-directory, envelope-encrypted witness now retains the version/time fields, including recovery when the primary is missing. Time is max-merged independently of sequence/epoch. Initialized state/witness metadata must be complete and supported; initialized plaintext state, corrupt/unreadable/foreign history and critical write/readback failures deny.
+  - **Persistence compatibility boundary:** valid legacy state (with or without a validation timestamp) still migrates without losing sequence, installation binding or activation. Saves now validate existing history even for legacy callers: unreadable bytes could contain initialized time, so the old corrupt-state overwrite/best-effort epoch read must not erase that evidence. This is required to preserve the new time floor, not a redesign of the Phase 4 binding/epoch/sequence rules. Legacy sequence-only witness writes and the enrollment witness keep their existing best-effort policy; licensing time checkpoints require **both** protected writes. A missing witness is recoverable only if its repair succeeds before authorization.
+  - `ClockRollbackDetected = 16` / `TimeIntegrityUnavailable = 17` append Warning event IDs **4616/4617**; existing IDs are unchanged. Reasons distinguish rollback, a throwing clock (`time_integrity_unavailable`) and state/lease/persistence failure (`state_store_unavailable`). Diagnostics contain only identifiers, timestamps, reason codes and exception type names; reporting cannot mask the denial or retry a failing clock.
+- **Affected production files:**
+  - `src/SSP.Activation/Models/LicenseStateRecord.cs`
+  - `src/SSP.Activation/Models/LicenseReasons.cs`
+  - `src/SSP.Activation/Models/LicenseSecurityEvent.cs`
+  - `src/SSP.Activation/Validation/LicenseTimeIntegrity.cs` (new)
+  - `src/SSP.Activation/Validation/LicenseValidator.cs`
+  - `src/SSP.Activation/LicenseManager.cs`
+  - `src/SSP.Server/Activation/SspLicenseStateFileLock.cs` (new)
+  - `src/SSP.Server/Activation/SspLicenseStateStore.cs`
+  - `src/SSP.Server/Activation/SspLicenseStateWitness.cs`
+  - `src/SSP.Server/Activation/SspSecurityEventSink.cs`
+- **Affected tests/docs:**
+  - `tests/SSP.Activation.Tests/Security/ClockRollbackTests.cs` (new)
+  - `tests/SSP.Tests/Activation/ClockRollbackStateTests.cs` (new)
+  - `tests/SSP.Tests/Activation/Runtime/ClockRollbackEnforcementTests.cs` (new)
+  - `tests/SSP.Tests/Activation/SspSecurityEventSinkTaxonomyTests.cs`
+  - `Security Correction.md`; `docs/THREAT_MODEL.md`
+- **Code review:** Static self-review performed, including the existing production composition, runtime choke points, protected-file writer and prior security tests. No issuer/trust-anchor, key scope, enrollment abuse policy, wire protocol, code-integrity gate, project dependency or network configuration was changed. Automated validation remains mandatory.
+- **Threat model update:** T36 plus updates to T3/T11/T33, state assets, clock assumptions, recovery and residual risks in `docs/THREAT_MODEL.md`. The historical `_reference/SSP.Activation/docs/SECURITY_AUDIT_REPORT.md` was consulted, not edited; M-6 here is the roadmap identifier, not an invented numbered audit finding.
+
+**Test source added (all execution pending):**
+
+| Coverage | Source |
+| --- | --- |
+| Forward/equal UTC, offset equivalence, inclusive not-before, exclusive expiry, same-license checkpoint refresh, one sample for both windows | `ClockRollbackTests` |
+| First-load and previously valid expiration cannot be revived; file-backed fresh-manager restart; legacy history; invalid versions; remembered time after clock/write failure | `ClockRollbackTests` |
+| Clock exceptions; load/save/discarded or unexpectedly advanced readback failure; failure or rollback between validation and Apply; delayed successful validation cannot clear lockdown; events/privacy and logging failure | `ClockRollbackTests` |
+| Encrypted/max-merged copies; independent witness time; primary deletion and fresh composition; missing-witness repair; migration with/without timestamps; malformed/plaintext/foreign/replayed history | `ClockRollbackStateTests` |
+| Actual primary/witness write faults (blocked atomic `.tmp` paths), missing-witness repair failure, unavailable lease, distinct-instance concurrency, delayed time writer vs renewal/activation | `ClockRollbackStateTests` |
+| Cross-process exclusive lease (filtered child testhost, no production test switch or additional dependency) | `ClockRollbackStateTests.FileLease_IsExclusiveAcrossProcesses` |
+| Every admission facade immediately denies; independent certification/payload expiry; pending activation and activation-write failure; startup/timer/recovery; non-destructive denial | `ClockRollbackEnforcementTests` |
+| Real authenticated handshake denies new slots while an existing admission is retained; real enrollment denial issues no code and preserves the Phase 1/2/4 enrollment state | `ClockRollbackEnforcementTests` |
+| All 17 event types and stable Warning IDs 4616/4617 | `SspSecurityEventSinkTaxonomyTests` |
+
+**Validation attempts and actual results (2026-09-06):**
+
+| Command/check | Result |
+| --- | --- |
+| `git diff --check` | Passed; no whitespace errors |
+| Tree-sitter C# parse of changed/new production and test sources | No syntax parse errors in 14 files; **not** a C# build, analyzer run or test result |
+| `dotnet restore SSP.sln -p:SSP_SKIP_EMBED=true` | Blocked before restore: `dotnet: command not found`, exit 127 |
+| `dotnet build SSP.sln --no-restore -p:SSP_SKIP_EMBED=true` | Blocked before compilation: same missing SDK, exit 127 |
+| `dotnet test SSP.sln --no-build --no-restore -p:SSP_SKIP_EMBED=true` (no filter) | Blocked before discovery/execution: same missing SDK, exit 127; **no pass count** |
+| `dotnet build SSP.sln` (normal embedded build) | Blocked before compilation: same missing SDK, exit 127 |
+
+**Remaining risks and required follow-up:**
+
+- Run restore, the whole-solution build and **all tests**, not just the new suites, with .NET 8; resolve every compiler/analyzer/test failure before marking Phase 6 Complete. Validate the Windows DPAPI path and the normal production embedded build with its runtime packs. `SSP_SKIP_EMBED=true` is the existing test workflow, never a shipping artifact.
+- The supplied **697/697** baseline has not been reproduced here and is not a Phase 6 result. SDK/download availability is an environment blocker, not evidence that the new code passes.
+- This is protected **local history**, not authoritative UTC. No history on first install, an expiration never observed/checkpointed, frozen/nonregressing manipulated time, coordinated restoration/deletion of all state/witness history, and privileged OS/process/code tampering remain outside the guarantee.
+- Any backward UTC correction is deliberately restrictive. An accidental large forward jump can raise the floor and deny until UTC reaches it again. Correct the clock and restore state-store availability, then fully revalidate a currently valid signed artifact; do not reset/delete the checkpoint or weaken the signed validity windows to recover.
+- Mandatory writes add local I/O/lock latency and make storage/lease availability necessary for new admissions. A failed write retains observed time in the guard that saw it; another/fresh guard cannot reconstruct an observation which reached neither durable copy, including after process/power loss. Primary-first/witness-second writes are not one power-loss-atomic transaction; partial writes fail the current call, and retained copies restrict subsequent validation. Coordinated rollback of all surviving evidence remains possible for the host owner.
+- Phase 2 cooldown calculations are unchanged. The licensing gate precedes code generation and denies observed licensing time rollback; this phase does not replace the separate enrollment clock or claim to make it authoritative. Already-admitted tunnels are not forcibly terminated, and per-packet time checking is not introduced.
 
 ---
 
