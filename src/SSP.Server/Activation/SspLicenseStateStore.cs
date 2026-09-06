@@ -39,12 +39,15 @@
 //         (state_store_unavailable), LicenseStateRollbackDetected is
 //         reported, and validation denies.
 //     A present-but-corrupt, plaintext or foreign-bound witness is an
-//     integrity violation and fails closed. A MISSING witness is never a
-//     violation: the primary file is authoritative while it is intact and
-//     consistent, and the next save re-establishes the witness.
+//     integrity violation and fails closed. An intact, consistent primary
+//     can recover a MISSING witness. Phase 6 additionally requires that
+//     recovery write to complete before authorization.
 //
 // The store is never a security boundary: it can only restrict
-// authorization, never grant it. Nothing here can restore authorization that
+// authorization, never grant it. Phase 6 (M-6) adds a versioned monotonic UTC
+// checkpoint to both copies, with mandatory checkpoint writes and a local
+// cross-process lease. The Phase 4 binding/epoch/sequence rules are unchanged.
+// Nothing here can restore authorization that
 // the signed artifact and the witnessed floor do not already allow.
 
 using System.Security.Cryptography;
@@ -59,7 +62,7 @@ namespace SSP.Server.Activation;
 /// <see cref="SSP.Activation.LicenseManager"/>. The store is never a security
 /// boundary: it can only restrict authorization, never grant it.
 /// </summary>
-public sealed class SspLicenseStateStore : ILicenseStateStore
+public sealed class SspLicenseStateStore : ILicenseStateStore, ILicenseTimeStateLock
 {
     /// <summary>Canonical name of the encrypted state file.</summary>
     public const string DefaultFileName = ".license-state.dat";
@@ -138,6 +141,11 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
     /// <summary>The path of the redundant encrypted witness file.</summary>
     public string WitnessPath => _witnessPath;
 
+    // A time observation holds this across Load + Save. Load/Save also acquire
+    // it reentrantly, including calls made through other store instances.
+    IDisposable ILicenseTimeStateLock.AcquireTimeStateLock()
+        => SspLicenseStateFileLock.Acquire(_path);
+
     /// <inheritdoc />
     /// <remarks>
     /// A missing file with no witness means no anti-rollback floor has been
@@ -151,6 +159,7 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
     /// </remarks>
     public LicenseStateRecord? Load()
     {
+        using var stateLock = SspLicenseStateFileLock.Acquire(_path);
         lock (_gate)
         {
             // The witness is read first: it is what turns "file missing" from
@@ -160,7 +169,7 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
             var witness = SspLicenseStateWitnessStore.Load(_witnessPath);
             VerifyWitnessBindingOrThrow(witness);
 
-            if (!File.Exists(_path))
+            if (!SspLicenseStateFileLock.FileExists(_path))
             {
                 if (witness is null)
                 {
@@ -187,6 +196,10 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
                     ActivatedLicenseId = witness.ActivatedLicenseId,
                     InstallationId = witness.InstallationId ?? _installationStateBindingId,
                     StateEpoch = witness.StateEpoch,
+                    // Phase 6: the diagnostic successful-validation timestamp
+                    // stays null, but deletion must NEVER erase witnessed time.
+                    ClockStateVersion = witness.ClockStateVersion,
+                    LastObservedUtc = witness.LastObservedUtc,
                 };
             }
 
@@ -201,6 +214,10 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
 
                 record = JsonSerializer.Deserialize<LicenseStateRecord>(read.Text, SerializerOptions)
                          ?? throw new InvalidDataException("License state store file could not be deserialized.");
+
+                _ = record.GetClockFloor();
+                if (record.ClockStateVersion != 0 && !read.WasEncrypted)
+                    throw new InvalidDataException("An initialized clock checkpoint must be envelope-encrypted.");
 
                 // A legacy plaintext state file is upgraded to the encrypted
                 // envelope once it has been read successfully. Best effort:
@@ -260,6 +277,20 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
                     $"than the witnessed epoch {witness.StateEpoch}.");
             }
 
+            // Phase 6: max-merge time independently of the Phase 4 epoch rule.
+            // An intact witness must retain the clock floor even if a legacy or
+            // stale primary lacks it; it can only make validation more restrictive.
+            if (witness is { ClockStateVersion: LicenseStateRecord.CurrentClockStateVersion })
+            {
+                var floor = record.GetClockFloor();
+                record = record with
+                {
+                    ClockStateVersion = LicenseStateRecord.CurrentClockStateVersion,
+                    LastObservedUtc = floor is { } utc && utc > witness.LastObservedUtc!.Value
+                        ? utc : witness.LastObservedUtc
+                };
+            }
+
             return record;
         }
     }
@@ -272,8 +303,30 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
             throw new ArgumentNullException(nameof(record));
         }
 
+        using var stateLock = SspLicenseStateFileLock.Acquire(_path);
         lock (_gate)
         {
+            // Phase 6: do not let any save erase an initialized time checkpoint.
+            // Validate existing material before writing, including legacy callers:
+            // unreadable history might contain initialized time, so the former
+            // best-effort epoch read / corrupt-state overwrite could erase it.
+            // Corrupt/foreign history cannot be "healed" into an earlier clock.
+            // The reentrant lease keeps time-only writes from racing the
+            // manager's acceptance/activation.
+            var current = Load();
+            var currentTime = current?.GetClockFloor();
+            var proposedTime = record.GetClockFloor();
+            var hasClockCheckpoint = record.ClockStateVersion != 0 || (current?.ClockStateVersion ?? 0) != 0;
+            if (hasClockCheckpoint)
+            {
+                record = record with
+                {
+                    ClockStateVersion = LicenseStateRecord.CurrentClockStateVersion,
+                    LastObservedUtc = currentTime is { } utc && (proposedTime is null || utc > proposedTime.Value)
+                        ? utc : proposedTime
+                };
+            }
+
             var directory = System.IO.Path.GetDirectoryName(_path);
             if (!string.IsNullOrEmpty(directory))
             {
@@ -288,7 +341,7 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
             var stamped = record with
             {
                 InstallationId = record.InstallationId ?? _installationStateBindingId,
-                StateEpoch = Math.Max(record.StateEpoch, ReadCurrentOnDiskEpoch()) + 1,
+                StateEpoch = checked(Math.Max(record.StateEpoch, current?.StateEpoch ?? 0) + 1),
             };
 
             var json = JsonSerializer.Serialize(stamped, SerializerOptions);
@@ -297,10 +350,9 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
             // Primary first, witness second: a crash between the two leaves a
             // lagging witness, which is the safe direction (a lagging witness
             // can only fail to detect, never falsely grant). The witness
-            // write itself is best effort for the same reason, and it
-            // max-merges with whatever is durably witnessed so it can never
-            // regress either. An unreadable existing witness is overwritten
-            // (self-healed) rather than propagated.
+            // write stays best effort for legacy sequence-only records. Phase 6
+            // checkpoints MUST complete both writes before a caller may authorize.
+            // A failed time write is propagated, never reported as success.
             try
             {
                 LicenseStateWitness? existing = null;
@@ -308,10 +360,10 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
                 {
                     existing = SspLicenseStateWitnessStore.Load(_witnessPath);
                 }
-                catch
+                catch when (!hasClockCheckpoint)
                 {
-                    // Corrupt/undecryptable witness: overwrite with a fresh,
-                    // primary-consistent one below.
+                    // Legacy sequence-only behavior; initialized time history
+                    // must never be replaced after an integrity failure.
                     existing = null;
                 }
 
@@ -324,15 +376,16 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
                         existing?.HighestAcceptedSequenceNumber ?? 0),
                     LastAcceptedLicenseId = stamped.LastAcceptedLicenseId,
                     ActivatedLicenseId = stamped.ActivatedLicenseId,
+                    ClockStateVersion = stamped.ClockStateVersion,
+                    LastObservedUtc = stamped.LastObservedUtc is { } utc &&
+                                      existing?.LastObservedUtc is { } witnessedUtc && witnessedUtc > utc
+                        ? witnessedUtc : stamped.LastObservedUtc,
                 });
             }
-            catch
+            catch when (!hasClockCheckpoint)
             {
-                // Best effort only: a witness write failure must never fail a
-                // state save whose primary file was already written. A
-                // persistently failing witness write disables deletion
-                // detection (documented residual); it can never grant
-                // authorization.
+                // Preserve legacy sequence-only witness behavior. Phase 6 time
+                // checkpoints deliberately do NOT enter this best-effort path.
             }
         }
     }
@@ -385,36 +438,4 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
         }
     }
 
-    /// <summary>
-    /// Best-effort read of the epoch currently on disk, used by
-    /// <see cref="Save"/> to keep the persisted epoch strictly monotonic even
-    /// when the caller's in-memory record is stale. Any failure (corrupt file,
-    /// I/O error, undecryptable envelope) yields 0, which simply means "stamp
-    /// from the caller's record": the write then overwrites the unreadable
-    /// file, and a rolled-back or corrupt file is healed by a fresh, valid
-    /// record. This method never throws and never influences authorization.
-    /// </summary>
-    private long ReadCurrentOnDiskEpoch()
-    {
-        try
-        {
-            if (!File.Exists(_path))
-            {
-                return 0;
-            }
-
-            var read = ProtectedFileStore.ReadTextAsync(_path).GetAwaiter().GetResult();
-            if (string.IsNullOrWhiteSpace(read.Text))
-            {
-                return 0;
-            }
-
-            var existing = JsonSerializer.Deserialize<LicenseStateRecord>(read.Text, SerializerOptions);
-            return existing?.StateEpoch ?? 0;
-        }
-        catch
-        {
-            return 0;
-        }
-    }
 }

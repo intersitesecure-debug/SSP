@@ -1,7 +1,7 @@
 namespace SSP.Activation;
 
 /// <summary>
-/// Persisted licensing state used for anti-rollback (highest accepted sequence number)
+/// Persisted licensing state used for anti-rollback (accepted sequence and local UTC)
 /// and diagnostics. This record can NEVER grant authorization — it can only restrict it.
 /// The root of trust is always the cryptographically signed license artifact; see
 /// docs/ARCHITECTURE.md for the documented security assumptions of persistence.
@@ -14,8 +14,43 @@ public sealed record LicenseStateRecord
     /// <summary>Identifier of the most recently accepted license (diagnostics).</summary>
     public Guid? LastAcceptedLicenseId { get; init; }
 
-    /// <summary>Time of the most recent successful validation (diagnostics).</summary>
+    /// <summary>Most recent successful validation; also the time lower bound for legacy migration.</summary>
     public DateTimeOffset? LastValidatedUtc { get; init; }
+
+    /// <summary>Version of the Phase 6 local clock checkpoint; zero denotes legacy state.</summary>
+    public int ClockStateVersion { get; init; }
+
+    /// <summary>
+    /// Highest observed UTC checkpoint (Phase 6 / M-6), including observations of
+    /// expiration. This is protected local history, NOT an authority-certified clock.
+    /// Null only on legacy records. It can only restrict authorization.
+    /// </summary>
+    public DateTimeOffset? LastObservedUtc { get; init; }
+
+    /// <summary>The current local clock-state format (independent of the signed artifact format).</summary>
+    public const int CurrentClockStateVersion = 1;
+
+    /// <summary>
+    /// Validates the clock metadata and returns its restrictive lower bound. Legacy
+    /// successful-validation timestamps seed migration; missing legacy history is not
+    /// corruption. An initialized-but-incomplete or unknown format must never be
+    /// treated as a fresh installation. Stores use this same check before merging.
+    /// </summary>
+    public DateTimeOffset? GetClockFloor()
+    {
+        if ((ClockStateVersion == 0 && LastObservedUtc is not null) ||
+            (ClockStateVersion == CurrentClockStateVersion && LastObservedUtc is null) ||
+            (ClockStateVersion != 0 && ClockStateVersion != CurrentClockStateVersion))
+        {
+            throw new InvalidDataException("License clock checkpoint metadata is invalid or unsupported.");
+        }
+
+        var floor = LastObservedUtc;
+        if (LastValidatedUtc is { } validated && (floor is null || validated > floor.Value))
+            floor = validated;
+
+        return floor?.ToUniversalTime();
+    }
 
     /// <summary>
     /// Identifier of the license whose activation code has been accepted on this

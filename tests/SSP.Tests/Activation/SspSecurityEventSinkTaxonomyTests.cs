@@ -9,9 +9,9 @@
 //   * the severity classes are exactly as reviewed (no event type is
 //     silently raised or lowered);
 //   * event ids are stable, unique and outside the system-defined range;
-//   * the taxonomy covers the full event vocabulary, and the exhaustive
-//     switch in SspSecurityEventSink fails compilation when the library
-//     appends a new event type, so the review cannot go stale silently.
+//   * the taxonomy covers the full event vocabulary, and the count + explicit
+//     expected-severity checks fail when the library appends an unreviewed
+//     event type, so the review cannot go stale silently.
 
 using System.Diagnostics;
 using System.Runtime.Versioning;
@@ -47,6 +47,8 @@ public class SspSecurityEventSinkTaxonomyTests
                 LicenseSecurityEventType.LicenseActivated => EventLogEntryType.Information,
                 LicenseSecurityEventType.LicenseStateRollbackDetected => EventLogEntryType.Warning,
                 LicenseSecurityEventType.LicenseStateDeletionRecovered => EventLogEntryType.Warning,
+                LicenseSecurityEventType.ClockRollbackDetected => EventLogEntryType.Warning,
+                LicenseSecurityEventType.TimeIntegrityUnavailable => EventLogEntryType.Warning,
                 _ => throw new Xunit.Sdk.XunitException($"No reviewed severity for {eventType}"),
             };
 
@@ -79,6 +81,12 @@ public class SspSecurityEventSinkTaxonomyTests
         // signals, not normal lifecycle transitions.
         Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseStateRollbackDetected));
         Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.LicenseStateDeletionRecovered));
+
+        // Phase 6 clock-integrity denials append stable ids; existing mappings stay intact.
+        Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.ClockRollbackDetected));
+        Assert.Equal(EventLogEntryType.Warning, LicensingEventLogTaxonomy.EntryTypeFor(LicenseSecurityEventType.TimeIntegrityUnavailable));
+        Assert.Equal(4616, LicensingEventLogTaxonomy.EventIdFor(LicenseSecurityEventType.ClockRollbackDetected));
+        Assert.Equal(4617, LicensingEventLogTaxonomy.EventIdFor(LicenseSecurityEventType.TimeIntegrityUnavailable));
 
         // Error is deliberately never used: the sink is best-effort and
         // licensing denial states are operational, not crashes.
@@ -115,10 +123,10 @@ public class SspSecurityEventSinkTaxonomyTests
     public void Taxonomy_CoversTheFullCurrentEventVocabulary()
     {
         // Pins the reviewed vocabulary: when the library appends an event
-        // type this assertion fails (and so does the exhaustive switch in the
-        // sink), which is exactly the signal that the taxonomy needs review.
+        // type this assertion fails, which is exactly the signal that the
+        // taxonomy needs review (the sink's fallback is for unknown values).
         var expected = Enum.GetValues<LicenseSecurityEventType>();
-        Assert.Equal(15, expected.Length);
+        Assert.Equal(17, expected.Length);
 
         Assert.Contains(LicenseSecurityEventType.LicenseLoaded, expected);
         Assert.Contains(LicenseSecurityEventType.LicenseValidated, expected);
@@ -135,5 +143,7 @@ public class SspSecurityEventSinkTaxonomyTests
         Assert.Contains(LicenseSecurityEventType.LicenseActivated, expected);
         Assert.Contains(LicenseSecurityEventType.LicenseStateRollbackDetected, expected);
         Assert.Contains(LicenseSecurityEventType.LicenseStateDeletionRecovered, expected);
+        Assert.Contains(LicenseSecurityEventType.ClockRollbackDetected, expected);
+        Assert.Contains(LicenseSecurityEventType.TimeIntegrityUnavailable, expected);
     }
 }

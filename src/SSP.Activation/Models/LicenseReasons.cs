@@ -30,6 +30,12 @@ public static class LicenseReasons
     public const string StateStoreUnavailable = "state_store_unavailable";
     public const string InternalError = "internal_error";
 
+    /// <summary>The local UTC clock regressed below protected, previously observed time.</summary>
+    public const string ClockRollbackDetected = "clock_rollback_detected";
+
+    /// <summary>The clock cannot be sampled reliably. State I/O failures retain state_store_unavailable.</summary>
+    public const string TimeIntegrityUnavailable = "time_integrity_unavailable";
+
     /// <summary>The license is valid but requires activation (10-digit code) before it can authorize anything.</summary>
     public const string ActivationRequired = "activation_required";
 

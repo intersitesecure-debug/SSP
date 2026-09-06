@@ -36,7 +36,13 @@ public enum LicenseSecurityEventType
     /// and the event is the operator-visible signal that the machine's
     /// licensing state was tampered with.
     /// </summary>
-    LicenseStateDeletionRecovered = 15
+    LicenseStateDeletionRecovered = 15,
+
+    /// <summary>Phase 6: UTC regressed below the protected local time checkpoint; operation denied.</summary>
+    ClockRollbackDetected = 16,
+
+    /// <summary>Phase 6: the clock or its required durable checkpoint is unavailable; operation denied.</summary>
+    TimeIntegrityUnavailable = 17
 }
 
 /// <summary>

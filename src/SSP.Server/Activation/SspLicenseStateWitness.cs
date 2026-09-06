@@ -9,17 +9,19 @@
 //   * the monotonic write epoch,
 //   * the highest accepted license sequence number (the anti-rollback floor),
 //   * the last accepted and activated license ids (restriction-relevant:
-//     ActivatedLicenseId gates activation-required licenses).
+//     ActivatedLicenseId gates activation-required licenses),
+//   * the versioned local UTC high-water mark (Phase 6 / M-6).
 //
 // Like the primary state record, the witness can only RESTRICT authorization
-// — it never grants anything. A missing witness is never a violation (the
-// primary state file is authoritative while it is intact and consistent); a
-// present-but-unreadable, plaintext or foreign-bound witness is an integrity
-// violation and fails closed.
+// — it never grants anything. An intact, consistent primary can recover a
+// missing witness, but Phase 6 requires that repair to succeed before granting
+// authorization. A present-but-unreadable, plaintext or foreign-bound witness
+// is an integrity violation and fails closed.
 
 using System.Security.Cryptography;
 using System.Text.Json;
 using SSP.Core.IO;
+using SSP.Activation;
 
 namespace SSP.Server.Activation;
 
@@ -43,6 +45,12 @@ public sealed record LicenseStateWitness
 
     /// <summary>License id whose activation was accepted (restriction-relevant state).</summary>
     public Guid? ActivatedLicenseId { get; init; }
+
+    /// <summary>Phase 6 clock checkpoint version; zero on legacy witnesses.</summary>
+    public int ClockStateVersion { get; init; }
+
+    /// <summary>Phase 6 monotonic local UTC checkpoint, retained even after primary deletion.</summary>
+    public DateTimeOffset? LastObservedUtc { get; init; }
 }
 
 /// <summary>
@@ -68,13 +76,13 @@ public static class SspLicenseStateWitnessStore
     /// </summary>
     public static LicenseStateWitness? Load(string path)
     {
-        if (!File.Exists(path))
-        {
-            return null;
-        }
-
         try
         {
+            if (!SspLicenseStateFileLock.FileExists(path))
+            {
+                return null;
+            }
+
             var read = ProtectedFileStore.ReadTextAsync(path).GetAwaiter().GetResult();
 
             // A legitimate witness is always written through the encrypted
@@ -97,6 +105,14 @@ public static class SspLicenseStateWitnessStore
                 throw new InvalidDataException("License state witness could not be deserialized.");
             }
 
+            // The same version/completeness rules apply to both copies. An
+            // initialized-but-incomplete witness must not look like legacy state.
+            _ = new LicenseStateRecord
+            {
+                ClockStateVersion = witness.ClockStateVersion,
+                LastObservedUtc = witness.LastObservedUtc
+            }.GetClockFloor();
+
             return witness;
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException
@@ -111,8 +127,8 @@ public static class SspLicenseStateWitnessStore
     /// <summary>
     /// Atomically writes the witness at <paramref name="path"/> in the
     /// encrypted-at-rest envelope. Throws on failure — callers decide whether
-    /// a witness write is best effort (the licensing store: yes, a lagging
-    /// witness is the safe direction) or critical.
+    /// a witness write is best effort (legacy sequence-only state) or critical
+    /// (Phase 6 time checkpoints require both copies before authorization).
     /// </summary>
     public static void Save(string path, LicenseStateWitness witness)
     {

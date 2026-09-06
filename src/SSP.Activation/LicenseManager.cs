@@ -25,6 +25,7 @@ public sealed class LicenseManager : ILicenseManager
     private readonly ISecurityEventSink _eventSink;
     private readonly ILicenseStateStore _stateStore;
     private readonly IClock _clock;
+    private readonly LicenseTimeIntegrity _time;
 
     private LicenseState _state = LicenseState.Unknown;
     private LicenseValidationResult? _lastResult;
@@ -97,6 +98,7 @@ public sealed class LicenseManager : ILicenseManager
             _stateStore,
             revocationChecker,
             _eventSink);
+        _time = _validator.TimeIntegrity;
     }
 
     // The read-only observers are deliberately lock-free (see _snapshot). They must never
@@ -234,18 +236,44 @@ public sealed class LicenseManager : ILicenseManager
         // against the state that was current at the instant the decision was made.
         lock (_gate)
         {
+            // Phase 6: do not wait for the periodic RSA/provider revalidation to
+            // notice clock rollback or expiry. This checks the already-verified
+            // license and checkpoints UTC before any policy can allow a new operation.
+            LicenseValidationResult? timeFailure = null;
+            if (_state == LicenseState.Valid && _currentLicense is { } current)
+            {
+                timeFailure = CheckTime(current);
+                if (timeFailure is not null)
+                    Apply(timeFailure, _lastArtifact);
+            }
+
             LicenseState state = _state;
             License? license = _state == LicenseState.Valid ? _currentLicense : null;
 
             AuthorizationDecision decision;
             try
             {
-                decision = _policy.Evaluate(new LicenseEvaluationContext
+                if (timeFailure is not null)
                 {
-                    ManagerState = state,
-                    License = license,
-                    Operation = operation
-                });
+                    decision = AuthorizationDecision.Deny(timeFailure.ReasonCode, timeFailure.Detail!);
+                }
+                else if (state != LicenseState.Valid)
+                {
+                    // A policy can restrict a currently valid license, not clear
+                    // lockdown. In particular, a later failed/missing reload must
+                    // not hide a time denial by replacing its diagnostic reason.
+                    decision = AuthorizationDecision.Deny(LicenseReasons.LicenseNotValid,
+                        $"Protected operation denied: license state is {state}.");
+                }
+                else
+                {
+                    decision = _policy.Evaluate(new LicenseEvaluationContext
+                    {
+                        ManagerState = state,
+                        License = license,
+                        Operation = operation
+                    });
+                }
             }
             catch
             {
@@ -257,10 +285,10 @@ public sealed class LicenseManager : ILicenseManager
 
             if (!decision.IsAllowed)
             {
-                _eventSink.Report(new LicenseSecurityEvent
+                _time.Report(new LicenseSecurityEvent
                 {
                     EventType = LicenseSecurityEventType.ProtectedOperationDenied,
-                    OccurredAtUtc = _clock.UtcNow,
+                    OccurredAtUtc = _time.EventTimeUtc,
                     State = state,
                     LicenseId = license?.Payload.LicenseId,
                     ReasonCode = decision.ReasonCode,
@@ -282,7 +310,7 @@ public sealed class LicenseManager : ILicenseManager
     /// Fail-closed by construction:
     ///   * no pending activation-required license -> no transition;
     ///   * wrong code -> stays ActivationRequired with <c>invalid_activation_code</c>;
-    ///   * activation state cannot be persisted -> stays ActivationRequired;
+    ///   * clock/checkpoint/activation persistence failure -> denied and locked down;
     ///   * a replay for another license id cannot activate it (the persisted id must match).
     /// The server never generates a code here — it can only verify one.
     /// </summary>
@@ -306,9 +334,15 @@ public sealed class LicenseManager : ILicenseManager
                     LicenseState.ActivationRequired,
                     LicenseReasons.ActivationRequired,
                     "There is no license awaiting activation. Load an activation-required license first.");
-                _eventSink.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, noPending));
+                _time.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, noPending));
                 return noPending;
             }
+
+            // Phase 6: an old ActivationRequired result is not evidence that the
+            // clock is still trustworthy or that either validity window is still open.
+            var pendingTimeFailure = CheckTime(pendingLicense);
+            if (pendingTimeFailure is not null)
+                return Apply(pendingTimeFailure, _lastArtifact);
 
             if (!LicenseActivation.ActivationCodeMatches(certification.ActivationCodeHash, activationCode))
             {
@@ -319,30 +353,15 @@ public sealed class LicenseManager : ILicenseManager
                     pendingLicense);
                 _lastResult = rejected;
                 PublishSnapshot();
-                _eventSink.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, rejected));
+                _time.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, rejected));
                 return rejected;
             }
 
-            // Persist activation bound to exactly this license id. A single-use, durable
-            // record: it can only ever mark ONE license activated, and it is what makes
-            // activation survive restart.
-            try
-            {
-                var record = _stateStore.Load() ?? new LicenseStateRecord();
-                _stateStore.Save(record with { ActivatedLicenseId = pendingLicense.Payload.LicenseId });
-            }
-            catch (Exception ex)
-            {
-                var persistFailed = LicenseValidationResult.Fail(
-                    LicenseState.ActivationRequired,
-                    LicenseReasons.StateStoreUnavailable,
-                    $"Activation state could not be persisted: {ex.GetType().Name}",
-                    pendingLicense);
-                _lastResult = persistFailed;
-                PublishSnapshot();
-                _eventSink.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, persistFailed));
-                return persistFailed;
-            }
+            // Persist the accepted code and the required time checkpoint under
+            // one state lease. A failure cannot mark the runtime licensed.
+            var activationFailure = CheckTime(pendingLicense, activateLicense: true);
+            if (activationFailure is not null)
+                return Apply(activationFailure, _lastArtifact);
 
             // Re-run validation so the validator observes the persisted activation state
             // and emits the Valid transition (this also performs the normal anti-rollback
@@ -350,10 +369,10 @@ public sealed class LicenseManager : ILicenseManager
             var revalidated = Revalidate();
             if (revalidated.IsValid)
             {
-                _eventSink.Report(new LicenseSecurityEvent
+                _time.Report(new LicenseSecurityEvent
                 {
                     EventType = LicenseSecurityEventType.LicenseActivated,
-                    OccurredAtUtc = _clock.UtcNow,
+                    OccurredAtUtc = _time.EventTimeUtc,
                     State = LicenseState.Valid,
                     LicenseId = pendingLicense.Payload.LicenseId,
                     ReasonCode = LicenseReasons.Ok,
@@ -369,6 +388,17 @@ public sealed class LicenseManager : ILicenseManager
     {
         lock (_gate)
         {
+            // Phase 6: validation may have raced time progression/rollback or
+            // another acceptance. Sample again under the manager gate, and commit
+            // required state BEFORE publishing Valid. A stale result can never
+            // clear lockdown without another successful time-integrity check.
+            if (result.IsValid || result.State == LicenseState.ActivationRequired)
+            {
+                var failure = CheckTime(result.License!, acceptLicense: result.IsValid);
+                if (failure is not null)
+                    result = failure;
+            }
+
             _lastResult = result;
             if (artifactJson is not null)
             {
@@ -377,65 +407,14 @@ public sealed class LicenseManager : ILicenseManager
 
             if (result.IsValid)
             {
-                // Anti-rollback is re-checked atomically under the manager lock. This closes
-                // the race where two concurrent validations could otherwise install an older
-                // license as current after a newer one had already persisted its floor: the
-                // state store can only ever restrict authorization, never grant it.
-                var payload = result.License!.Payload;
-                LicenseStateRecord? stored;
-                try
-                {
-                    stored = _stateStore.Load();
-                }
-                catch
-                {
-                    // A state-store read failure during Apply is treated the same way as
-                    // PersistAcceptedSequence does: the signature is the root of trust, so a
-                    // transient store failure never blocks an already-validated license.
-                    stored = null;
-                }
-
-                if (stored is not null && payload.SequenceNumber < stored.HighestAcceptedSequenceNumber)
-                {
-                    var supersededEvent = new LicenseSecurityEvent
-                    {
-                        EventType = LicenseSecurityEventType.LicenseSuperseded,
-                        OccurredAtUtc = _clock.UtcNow,
-                        State = LicenseState.Superseded,
-                        LicenseId = payload.LicenseId,
-                        ReasonCode = LicenseReasons.Superseded,
-                        Detail = $"License sequence {payload.SequenceNumber} is older than the highest accepted sequence {stored.HighestAcceptedSequenceNumber}."
-                    };
-                    var superseded = LicenseValidationResult.Fail(
-                        LicenseState.Superseded,
-                        LicenseReasons.Superseded,
-                        supersededEvent.Detail!,
-                        result.License,
-                        supersededEvent);
-
-                    _lastResult = superseded;
-                    _eventSink.Report(supersededEvent);
-                    var wasAlreadyLockedDown = _state == LicenseState.LockedDown;
-                    _state = LicenseState.LockedDown;
-                    _currentLicense = null;
-                    PublishSnapshot();
-                    if (!wasAlreadyLockedDown)
-                    {
-                        _eventSink.Report(MakeEvent(LicenseSecurityEventType.LicenseLockdownActivated, superseded));
-                    }
-
-                    return superseded;
-                }
-
                 var wasLockedDown = _state == LicenseState.LockedDown;
                 _state = LicenseState.Valid;
                 _currentLicense = result.License;
                 PublishSnapshot();
-                PersistAcceptedSequence(payload);
 
                 if (wasLockedDown)
                 {
-                    _eventSink.Report(MakeEvent(LicenseSecurityEventType.LicenseLockdownCleared, result));
+                    _time.Report(MakeEvent(LicenseSecurityEventType.LicenseLockdownCleared, result));
                 }
 
                 return result;
@@ -449,7 +428,7 @@ public sealed class LicenseManager : ILicenseManager
                 _state = LicenseState.ActivationRequired;
                 _currentLicense = null;
                 PublishSnapshot();
-                _eventSink.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, result));
+                _time.Report(MakeEvent(LicenseSecurityEventType.ActivationRequired, result));
                 return result;
             }
 
@@ -473,43 +452,67 @@ public sealed class LicenseManager : ILicenseManager
             PublishSnapshot();
             if (!wasLocked)
             {
-                _eventSink.Report(MakeEvent(LicenseSecurityEventType.LicenseLockdownActivated, result));
+                _time.Report(MakeEvent(LicenseSecurityEventType.LicenseLockdownActivated, result));
             }
 
             return result;
         }
     }
 
-    private void PersistAcceptedSequence(LicensePayload payload)
+    /// <summary>
+    /// Phase 6 time check and required checkpoint. The existing sequence/activation
+    /// rules are rechecked inside the same state lease as their write, so time-only
+    /// saves never erase concurrent license bookkeeping. Only Apply's already-valid
+    /// result may advance the accepted sequence; a window failure records time only.
+    /// </summary>
+    private LicenseValidationResult? CheckTime(
+        License license, bool acceptLicense = false, bool activateLicense = false)
     {
-        try
+        var observation = _time.Observe(license, (record, now) =>
         {
-            var record = _stateStore.Load() ?? new LicenseStateRecord();
-            if (payload.SequenceNumber > record.HighestAcceptedSequenceNumber ||
-                record.LastAcceptedLicenseId != payload.LicenseId ||
-                record.LastValidatedUtc is null)
+            var windowFailure = _time.CheckWindow(license, now);
+            if (windowFailure is not null)
+                return (record, windowFailure);
+
+            var payload = license.Payload;
+            if ((acceptLicense || activateLicense) && payload.SequenceNumber < record.HighestAcceptedSequenceNumber)
             {
-                _stateStore.Save(record with
+                return (record, LicenseTimeIntegrity.Failure(license, now,
+                    LicenseState.Superseded, LicenseReasons.Superseded, LicenseSecurityEventType.LicenseSuperseded,
+                    $"License sequence {payload.SequenceNumber} is older than the highest accepted sequence {record.HighestAcceptedSequenceNumber}."));
+            }
+
+            if (acceptLicense && license.Certification is { RequiresActivation: true } &&
+                record.ActivatedLicenseId != payload.LicenseId)
+            {
+                return (record, LicenseTimeIntegrity.Failure(license, now,
+                    LicenseState.ActivationRequired, LicenseReasons.ActivationRequired, LicenseSecurityEventType.ActivationRequired,
+                    "This license requires its activation code before protected operations can be authorized."));
+            }
+
+            if (activateLicense)
+                record = record with { ActivatedLicenseId = payload.LicenseId };
+
+            if (acceptLicense)
+            {
+                record = record with
                 {
                     HighestAcceptedSequenceNumber = Math.Max(record.HighestAcceptedSequenceNumber, payload.SequenceNumber),
                     LastAcceptedLicenseId = payload.LicenseId,
-                    LastValidatedUtc = _clock.UtcNow
-                });
+                    LastValidatedUtc = now
+                };
             }
-        }
-        catch
-        {
-            // State store writes remain best effort by contract: the signed
-            // artifact is the root of trust, while the persisted floor only
-            // restricts future authorization.
-        }
+
+            return (record, null);
+        });
+        return observation.Failure;
     }
 
     private LicenseSecurityEvent MakeEvent(LicenseSecurityEventType eventType, LicenseValidationResult result)
         => new()
         {
             EventType = eventType,
-            OccurredAtUtc = _clock.UtcNow,
+            OccurredAtUtc = _time.EventTimeUtc,
             State = result.State,
             LicenseId = result.License?.Payload.LicenseId,
             ReasonCode = result.ReasonCode,
