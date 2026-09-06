@@ -372,27 +372,19 @@ public class ClockRollbackStateTests
         Assert.Equal(state.LastObservedUtc, witness.LastObservedUtc);
     }
 
-    // The same test in a filtered child testhost is a small test-only lock probe.
-    // This exercises the actual .NET file lease across PROCESSES, without adding
-    // a production CLI switch, native utility, shell, or another build project.
-    private const string ProbePipeVariable = "SSP_TEST_CLOCK_LOCK_PROBE_PIPE";
-    private const string ProbeStateVariable = "SSP_TEST_CLOCK_LOCK_PROBE_STATE";
-
-    // The child is a second full `dotnet vstest` host. Under the parallel
-    // suite that host can take tens of seconds just to start (testhost
-    // spawn + discovery on a loaded machine), and the assertions below must
-    // stay sequential. Every per-step window is therefore sized for a loaded
-    // machine; the Fact timeout is only the final backstop against a child
-    // that never connects at all.
+    // The probe is a second genuine process: the lease is reentrant per
+    // thread and its acquisition map is thread-local, so a second thread of
+    // this process cannot stand in for a holder in another process. It is
+    // this assembly's own entry point, started with `dotnet exec`, so it
+    // needs no production CLI switch, native utility, shell or another build
+    // project, and - unlike a second `dotnet vstest` host - no adapter
+    // discovery or test enumeration before it begins holding the lease. All
+    // steps below are hard-bounded independently of named-pipe cancellation
+    // semantics, so a dead probe fails fast with its captured output instead
+    // of hanging until the Fact timeout.
     [Fact(Timeout = 300_000)]
     public async Task FileLease_IsExclusiveAcrossProcesses()
     {
-        if (Environment.GetEnvironmentVariable(ProbePipeVariable) is { } childPipe)
-        {
-            RunLockProbe(childPipe, Environment.GetEnvironmentVariable(ProbeStateVariable)!);
-            return;
-        }
-
         using var fixture = new NativeFixture();
         using var service = fixture.NewService();
         Assert.True(service.Load().IsValid);
@@ -404,21 +396,28 @@ public class ClockRollbackStateTests
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
             CreateNoWindow = true
         };
-        start.ArgumentList.Add("vstest");
+        start.ArgumentList.Add("exec");
         start.ArgumentList.Add(typeof(ClockRollbackStateTests).Assembly.Location);
-        start.ArgumentList.Add("/TestCaseFilter:FullyQualifiedName=SSP.Tests.Activation.ClockRollbackStateTests.FileLease_IsExclusiveAcrossProcesses");
-        start.Environment[ProbePipeVariable] = pipeName;
-        start.Environment[ProbeStateVariable] = fixture.Paths.StateStorePath;
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Cannot start lock-probe testhost.");
+        start.ArgumentList.Add(ClockLockProbe.Command);
+        start.ArgumentList.Add(pipeName);
+        start.ArgumentList.Add(fixture.Paths.StateStorePath);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Cannot start clock-lock probe.");
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         try
         {
-            // The child testhost is only expected to connect once its full
-            // discovery pass has run; under the parallel suite that alone can
-            // take tens of seconds, so the connect window is the largest one.
-            using var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(100));
-            await pipe.WaitForConnectionAsync(connectTimeout.Token);
+            // Named-pipe wait cancellation depends on the pipe's overlapped
+            // I/O mode, so a token alone is not a hard bound. Racing the
+            // connect against a plain timer and the probe exit bounds the
+            // wait regardless, and a probe that died early surfaces its
+            // captured output instead of a silent hang.
+            using var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var connect = pipe.WaitForConnectionAsync(connectTimeout.Token);
+            var winner = await Task.WhenAny(connect, process.WaitForExitAsync(), Task.Delay(TimeSpan.FromSeconds(61)));
+            if (winner != connect)
+                Assert.Fail($"Clock-lock probe did not connect within 60 s:{Environment.NewLine}{await CollectChildOutputAsync(stdout, stderr)}");
+            await connect;
+
             using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
             using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
             Assert.Equal("locked", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(30)));
@@ -432,7 +431,7 @@ public class ClockRollbackStateTests
             await writer.WriteLineAsync("release");
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(60));
             if (process.ExitCode != 0)
-                Assert.True(false, await CollectChildOutputAsync(stdout, stderr));
+                Assert.Fail(await CollectChildOutputAsync(stdout, stderr));
             Assert.True(service.Revalidate().IsValid); // a stale empty .lock file is not a lock
         }
         finally
@@ -443,18 +442,6 @@ public class ClockRollbackStateTests
                 await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
             }
         }
-    }
-
-    private static void RunLockProbe(string pipeName, string statePath)
-    {
-        using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
-        pipe.Connect(60_000);
-        using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
-        using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
-        // Synchronous lease: acquire and dispose on the same thread, no await.
-        using var lease = ((ILicenseTimeStateLock)new SspLicenseStateStore(statePath)).AcquireTimeStateLock();
-        writer.WriteLine("locked");
-        Assert.Equal("release", reader.ReadLine());
     }
 
     /// <summary>
