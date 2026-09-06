@@ -50,6 +50,31 @@ To restore the previous, stricter behaviour for a CI leg that has a working
 feed: `/p:WarningsNotAsErrors=` (advisories fatal again) or `/p:NuGetAudit=true`
 per project.
 
+## 1b. Runtime code-integrity (Phase 5 / M-4): no build impact unless armed
+
+`src/SSP.Core/CodeIntegrity` (manifest + streaming SHA-256 verifier) is pure BCL
+(`System.Security.Cryptography`, `System.Text.Json`) — **no new package**, so the
+dependency inventory below and the offline restore contract are unchanged. The
+SSP.Server gate (`RuntimeCodeIntegrity`, called at the top of
+`SspRuntimeLicense.CreateForService`) is a **no-op unless a build is armed**, and
+arming is opt-in at the release ceremony only:
+
+```powershell
+dotnet publish src/SSP.Server/SSP.Server.csproj -c Release -r win-x64 \
+    -p:PublishSingleFile=true \
+    -p:SspRequireCodeIntegrity=true \
+    -p:SspCodeIntegrityManifestFile=D:\ceremony\ssp-code-integrity.json
+```
+
+`Activation/SspCodeIntegrity.targets` embeds that JSON as
+`SSP.Server.CodeIntegrity.manifest.json` and propagates it into the standalone
+`SSP.ServiceHost` publish via `SspCodeIntegrityPublishArgs`. Developer/CI builds
+(including `SSP_SKIP_EMBED=true` test builds) never set the property, embed
+nothing, and are byte-for-byte unaffected. See `Security Correction.md` Phase 5,
+`docs/THREAT_MODEL.md` T35, and the manifest schema in
+`src/SSP.Core/CodeIntegrity/CodeIntegrityManifest.cs` (pinned by
+`RuntimeCodeIntegrityTests`).
+
 ## 2. Dependency inventory
 
 Direct package dependencies of the whole solution — verified against the

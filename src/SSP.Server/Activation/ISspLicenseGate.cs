@@ -203,6 +203,23 @@ public sealed class SspActivationException : Exception
     /// <summary>SSP-specific reason code for a licensing subsystem that failed to compose.</summary>
     public const string CompositionFailedReason = "activation_composition_failed";
 
+    /// <summary>
+    /// SSP-specific reason code for a runtime code-integrity verification failure
+    /// (Security Correction roadmap Phase 5 / M-4): a protected runtime component
+    /// was missing, tampered with, or unreadable at protected-service startup, so
+    /// the service refuses to start. The signed license artifact remains the root
+    /// of trust; this is an independent, fail-closed code-integrity gate in front
+    /// of it.
+    /// </summary>
+    public const string CodeIntegrityFailureReason = "code_integrity_failure";
+
+    /// <summary>
+    /// SSP-specific reason code for a build that carries a code-integrity manifest
+    /// which is empty or malformed, so the protected binaries cannot be verified.
+    /// Treated as a fail-closed condition: no protected service is started.
+    /// </summary>
+    public const string CodeIntegrityManifestInvalidReason = "code_integrity_manifest_invalid";
+
     public SspActivationException(string reasonCode, string message)
         : base(message)
     {

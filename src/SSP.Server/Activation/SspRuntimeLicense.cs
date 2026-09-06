@@ -126,6 +126,18 @@ public sealed class SspRuntimeLicense : ISspLicenseGate, IDisposable
     {
         ArgumentNullException.ThrowIfNull(config);
 
+        // Phase 5 (M-4): runtime code-integrity gate. Runs before any licensing
+        // composition so a protected service refuses to start when its on-disk
+        // runtime components no longer match the trusted baseline. No-op on
+        // unarmed (developer/test) builds, where the compiled-in trust anchor and
+        // signed license remain the only gate; on an armed release build any
+        // missing/tampered/unreadable protected component throws
+        // SspActivationException (code_integrity_failure) and the service is not
+        // started. Both protected-service start paths (SCM OnStart and the
+        // foreground --run-once mode) reach this factory, so the gate is exactly
+        // one place.
+        RuntimeCodeIntegrity.VerifyArmedStartup(serviceDir);
+
         if (!SspTrustAnchor.IsCompiledIn)
         {
             // Fail closed. There is no root of trust in this build, so no
