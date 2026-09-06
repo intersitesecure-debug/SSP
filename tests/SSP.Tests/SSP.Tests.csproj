@@ -9,7 +9,7 @@
       Executable so the assembly carries the entry point used by
       ClockRollbackStateTests.FileLease_IsExclusiveAcrossProcesses: the test
       starts a real second process by launching this project's apphost (or
-      `dotnet exec -- <this assembly>`), which acquires the production
+      by running this assembly with `dotnet exec`), which acquires the production
       cross-process lease through the public ILicenseTimeStateLock seam.
       OutputType=Exe emits both the apphost and the runtimeconfig.json
       `dotnet exec` needs. The probe must start without the adapter
