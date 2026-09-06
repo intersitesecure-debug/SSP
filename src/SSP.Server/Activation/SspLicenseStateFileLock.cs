@@ -17,6 +17,13 @@ namespace SSP.Server.Activation;
 /// bursts of legitimate concurrent checkpoints serialize through the lease and
 /// succeed instead of failing closed. Only after the bound expires does a waiter
 /// conclude that the state is unavailable.
+///
+/// Exclusivity is a byte-range lock on a shared handle, not FileShare.None.
+/// Opening with FileShare.None makes CreateFile wait for an oplock break on
+/// Windows: if the holder is blocked (for example on a named-pipe read) that
+/// wait never returns, which would violate the acquisition bound. LockFileEx /
+/// fcntl F_SETLK fail immediately when the region is held, so the elapsed-time
+/// bound is always reachable.
 /// </summary>
 internal static class SspLicenseStateFileLock
 {
@@ -40,23 +47,51 @@ internal static class SspLicenseStateFileLock
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var wait = timeout ?? DefaultAcquisitionTimeout;
         var elapsed = Stopwatch.StartNew();
-        while (true)
+        Exception? lastFailure = null;
+        while (elapsed.Elapsed < wait)
         {
+            if (Directory.Exists(path))
+            {
+                throw new IOException("A directory occupies the license state lock path.");
+            }
+
+            FileStream? stream = null;
             try
             {
-                var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite,
-                    FileShare.None, bufferSize: 1, FileOptions.None);
+                // Share ReadWrite so CreateFile cannot block on an oplock held by
+                // another process. Exclusivity is the one-byte region lock, which
+                // fails immediately instead of waiting.
+                stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                    FileShare.ReadWrite, bufferSize: 1, FileOptions.None);
+                stream.Lock(0, 1);
                 held = new HeldLock(stream);
                 locks.Add(path, held);
                 return new Lease(path, held, locks);
             }
-            catch (IOException) when (elapsed.Elapsed < wait)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
+                stream?.Dispose();
+                lastFailure = ex;
+                if (Directory.Exists(path))
+                {
+                    throw new IOException("A directory occupies the license state lock path.", ex);
+                }
+
                 // A short poll interval keeps handoff latency low while a
-                // legitimate holder finishes; an attempt is only a file open.
+                // legitimate holder finishes; an attempt is only a file open
+                // plus a non-blocking region lock.
                 Thread.Sleep(10);
             }
+            catch
+            {
+                stream?.Dispose();
+                throw;
+            }
         }
+
+        throw new IOException(
+            "License state lease could not be acquired within the acquisition bound.",
+            lastFailure);
     }
 
     /// <summary>
@@ -102,6 +137,7 @@ internal static class SspLicenseStateFileLock
             _disposed = true;
             if (--_held.Depth != 0) return;
             _locks.Remove(_path);
+            try { _held.Stream.Unlock(0, 1); } catch { /* Dispose still releases the region. */ }
             _held.Stream.Dispose();
             // Never delete the lock file: another process may already hold a
             // handle to it. A stale empty file itself does not hold a lock.

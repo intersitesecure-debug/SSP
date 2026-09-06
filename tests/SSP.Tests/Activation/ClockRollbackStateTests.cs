@@ -375,14 +375,17 @@ public class ClockRollbackStateTests
     // The probe is a second genuine process: the lease is reentrant per
     // thread and its acquisition map is thread-local, so a second thread of
     // this process cannot stand in for a holder in another process. It is
-    // this assembly's own entry point, started with `dotnet exec`, so it
-    // needs no production CLI switch, native utility, shell or another build
-    // project, and - unlike a second `dotnet vstest` host - no adapter
-    // discovery or test enumeration before it begins holding the lease. All
-    // steps below are hard-bounded independently of named-pipe cancellation
-    // semantics, so a dead probe fails fast with its captured output instead
-    // of hanging until the Fact timeout.
-    [Fact(Timeout = 300_000)]
+    // this assembly's own entry point, started as the test apphost (or
+    // `dotnet exec -- <dll>`), so it needs no production CLI switch, native
+    // utility, shell or another build project, and - unlike a second
+    // `dotnet vstest` host - no adapter discovery or test enumeration
+    // before it begins holding the lease. DOTNET_HOST_PATH is not used as
+    // the child image: under `dotnet test` it can point at testhost, which
+    // waits for a runner that never connects. All steps below are
+    // hard-bounded independently of named-pipe cancellation semantics, so a
+    // dead probe fails fast with its captured output instead of hanging
+    // until the Fact timeout.
+    [Fact(Timeout = 120_000)]
     public async Task FileLease_IsExclusiveAcrossProcesses()
     {
         using var fixture = new NativeFixture();
@@ -391,17 +394,8 @@ public class ClockRollbackStateTests
         var pipeName = "ssp-clock-lock-" + Guid.NewGuid().ToString("N");
         using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
             PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-        var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
-        {
-            UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        start.ArgumentList.Add("exec");
-        start.ArgumentList.Add(typeof(ClockRollbackStateTests).Assembly.Location);
-        start.ArgumentList.Add(ClockLockProbe.Command);
-        start.ArgumentList.Add(pipeName);
-        start.ArgumentList.Add(fixture.Paths.StateStorePath);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Cannot start clock-lock probe.");
+        using var process = Process.Start(CreateProbeStartInfo(pipeName, fixture.Paths.StateStorePath))
+            ?? throw new InvalidOperationException("Cannot start clock-lock probe.");
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         try
@@ -411,36 +405,130 @@ public class ClockRollbackStateTests
             // connect against a plain timer and the probe exit bounds the
             // wait regardless, and a probe that died early surfaces its
             // captured output instead of a silent hang.
-            using var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var connect = pipe.WaitForConnectionAsync(connectTimeout.Token);
-            var winner = await Task.WhenAny(connect, process.WaitForExitAsync(), Task.Delay(TimeSpan.FromSeconds(61)));
+            var winner = await Task.WhenAny(connect, process.WaitForExitAsync(), Task.Delay(TimeSpan.FromSeconds(31)));
             if (winner != connect)
-                Assert.Fail($"Clock-lock probe did not connect within 60 s:{Environment.NewLine}{await CollectChildOutputAsync(stdout, stderr)}");
+                Assert.Fail($"Clock-lock probe did not connect within 30 s:{Environment.NewLine}{await CollectChildOutputAsync(stdout, stderr)}");
             await connect;
 
-            using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
-            using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
-            Assert.Equal("locked", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(30)));
+            var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            using var reader = new StreamReader(pipe, utf8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+            using var writer = new StreamWriter(pipe, utf8, bufferSize: 1024, leaveOpen: true) { AutoFlush = true };
+            using var lockedTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            Assert.Equal("locked", await reader.ReadLineAsync(lockedTimeout.Token).AsTask());
 
             // The parent's lease acquisition is bounded (it must fail closed
             // while the child holds the lease), so the decision itself takes
             // the full acquisition bound; the cap only covers scheduling lag.
-            var decision = await Task.Run(() => service.Enforcement.RequireValidLicense()).WaitAsync(TimeSpan.FromSeconds(60));
+            var decision = await Task.Run(() => service.Enforcement.RequireValidLicense())
+                .WaitAsync(TimeSpan.FromSeconds(45));
             Assert.False(decision.IsAllowed);
             Assert.Equal(LicenseReasons.StateStoreUnavailable, service.LastValidationResult!.ReasonCode);
             await writer.WriteLineAsync("release");
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            await writer.FlushAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
             if (process.ExitCode != 0)
                 Assert.Fail(await CollectChildOutputAsync(stdout, stderr));
             Assert.True(service.Revalidate().IsValid); // a stale empty .lock file is not a lock
         }
         finally
         {
-            if (!process.HasExited)
+            TryStopProbe(process);
+        }
+    }
+
+    /// <summary>
+    /// Launch this assembly's own entry point without going through testhost.
+    /// Prefer the apphost emitted because OutputType=Exe; fall back to the
+    /// dotnet muxer (never testhost via DOTNET_HOST_PATH). Strip VSTest
+    /// hooks so the child cannot wait for a debugger or runner.
+    /// </summary>
+    private static ProcessStartInfo CreateProbeStartInfo(string pipeName, string statePath)
+    {
+        var assemblyPath = typeof(ClockRollbackStateTests).Assembly.Location;
+        var directory = Path.GetDirectoryName(assemblyPath);
+        if (string.IsNullOrEmpty(directory) || !File.Exists(assemblyPath))
+        {
+            directory = AppContext.BaseDirectory;
+            assemblyPath = Path.Combine(directory, "SSP.Tests.dll");
+        }
+
+        var start = new ProcessStartInfo
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            WorkingDirectory = directory
+        };
+
+        var apphost = Path.Combine(directory, OperatingSystem.IsWindows() ? "SSP.Tests.exe" : "SSP.Tests");
+        if (File.Exists(apphost))
+        {
+            start.FileName = apphost;
+        }
+        else
+        {
+            start.FileName = ResolveDotnetMuxer();
+            start.ArgumentList.Add("exec");
+            start.ArgumentList.Add(assemblyPath);
+            start.ArgumentList.Add("--");
+        }
+
+        start.ArgumentList.Add(ClockLockProbe.Command);
+        start.ArgumentList.Add(pipeName);
+        start.ArgumentList.Add(statePath);
+
+        start.Environment.Remove("DOTNET_STARTUP_HOOKS");
+        start.Environment.Remove("DOTNET_INSERT_LIBC_HOOKS");
+        start.Environment.Remove("VSTEST_HOST_DEBUG");
+        start.Environment.Remove("VSTEST_RUNNER_DEBUG");
+        start.Environment.Remove("VSTEST_CONNECTION_TIMEOUT");
+        return start;
+    }
+
+    private static string ResolveDotnetMuxer()
+    {
+        var configured = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+        if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured))
+        {
+            var name = Path.GetFileNameWithoutExtension(configured);
+            if (string.Equals(name, "dotnet", StringComparison.OrdinalIgnoreCase))
+                return configured;
+        }
+
+        var processPath = Environment.ProcessPath;
+        if (!string.IsNullOrWhiteSpace(processPath) &&
+            string.Equals(Path.GetFileNameWithoutExtension(processPath), "dotnet", StringComparison.OrdinalIgnoreCase) &&
+            File.Exists(processPath))
+        {
+            return processPath;
+        }
+
+        return OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+    }
+
+    private static void TryStopProbe(Process process)
+    {
+        try
+        {
+            if (process.HasExited) return;
+        }
+        catch { return; }
+
+        try
+        {
+            var stop = Task.Run(() =>
             {
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
-            }
+                try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { /* best effort */ }
+                try { process.WaitForExit(5_000); } catch { /* best effort */ }
+            });
+            stop.Wait(TimeSpan.FromSeconds(8));
+        }
+        catch
+        {
+            // A stuck kill must not keep the test running until the Fact timeout.
         }
     }
 
@@ -454,7 +542,7 @@ public class ClockRollbackStateTests
     {
         try
         {
-            var output = await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(30));
+            var output = await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(5));
             return output[0] + output[1];
         }
         catch (Exception ex)

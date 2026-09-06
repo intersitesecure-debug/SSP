@@ -423,7 +423,7 @@ Evaluate:
 | Clock exceptions; load/save/discarded or unexpectedly advanced readback failure; failure or rollback between validation and Apply; delayed successful validation cannot clear lockdown; events/privacy and logging failure | `ClockRollbackTests` |
 | Encrypted/max-merged copies; independent witness time; primary deletion and fresh composition; missing-witness repair; migration with/without timestamps; malformed/plaintext/foreign/replayed history | `ClockRollbackStateTests` |
 | Actual primary/witness write faults (blocked atomic `.tmp` paths), missing-witness repair failure, unavailable lease, distinct-instance concurrency, delayed time writer vs renewal/activation | `ClockRollbackStateTests` |
-| Cross-process exclusive lease (assembly probe entry point run via `dotnet exec`; no production test switch, native utility, shell or additional build project/dependency) | `ClockRollbackStateTests.FileLease_IsExclusiveAcrossProcesses` |
+| Cross-process exclusive lease (assembly probe entry point run as this test apphost / `dotnet exec`; no production test switch, native utility, shell or additional build project/dependency) | `ClockRollbackStateTests.FileLease_IsExclusiveAcrossProcesses` |
 | Every admission facade immediately denies; independent certification/payload expiry; pending activation and activation-write failure; startup/timer/recovery; non-destructive denial | `ClockRollbackEnforcementTests` |
 | Real authenticated handshake denies new slots while an existing admission is retained; real enrollment denial issues no code and preserves the Phase 1/2/4 enrollment state | `ClockRollbackEnforcementTests` |
 | All 17 event types and stable Warning IDs 4616/4617 | `SspSecurityEventSinkTaxonomyTests` |
