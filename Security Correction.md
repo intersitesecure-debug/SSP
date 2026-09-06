@@ -1,9 +1,9 @@
 # SSP Security Corrections Roadmap
 
-**Status:** Active — Phases 1–3 complete and merged (full suite 658/658 passed on the merged branch); Phase 4 implemented (Steps 4–6), awaiting automated validation in a .NET 8 SDK environment
+**Status:** Active — Phases 1–4 complete and merged (full suite 685/685 passed on the merged branch); Phase 5 implemented (Step 7), awaiting automated validation in a .NET 8 SDK environment
 **Authority:** This document is the source of truth for SSP security hardening work.  
 **Execution order:** Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6  
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-06
 
 ## Operating rules
 
@@ -35,8 +35,8 @@
 | 1 | Enrollment Authentication Code Protection (M-1) | Complete | Complete (self-review) | Passed (658/658 post-merge) | Complete |
 | 2 | Authentication Abuse Resistance (remaining M-1) | Complete | Complete (self-review) | Passed (658/658 post-merge) | Complete |
 | 3 | Client Private Key Protection (M-2) | Complete | Complete (self-review) | Passed (658/658 post-merge) | Complete |
-| 4 | License State Anti-Rollback Protection (M-3) | In progress — implementation complete (Steps 4–6) | Complete (self-review) | Blocked in current environment — `dotnet` unavailable; 27 tests written | Complete |
-| 5 | Runtime Code Integrity Protection (M-4) | Not started | Not started | Not started | Not started |
+| 4 | License State Anti-Rollback Protection (M-3) | Complete — merged; full suite 685/685 passed | Complete (self-review) | Passed (685/685 post-merge) | Complete |
+| 5 | Runtime Code Integrity Protection (M-4) | In progress — implementation complete (Step 7) | Complete (self-review) | Written (new `RuntimeCodeIntegrityTests`); execution blocked in current environment — `dotnet` unavailable | Complete |
 | 6 | Clock Rollback Protection (M-6) | Not started | Not started | Not started | Not started |
 
 ## Step-by-step change log
@@ -305,11 +305,11 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 
 **Goal:** Detect tampering and refuse execution rather than relying only on multiple enforcement gates.
 
-**Phase status:** Not started  
-**Current step:** None  
-**Code review:** Not started  
-**Automated tests:** Not started  
-**Threat model update:** Not started
+**Phase status:** Implementation complete (Step 7); automated validation pending a .NET 8 SDK environment
+**Current step:** Step 7 — implementation complete, awaiting automated validation
+**Code review:** Step 7 complete (self-review)
+**Automated tests:** Written for Step 7 (new `tests/SSP.Tests/RuntimeCodeIntegrityTests.cs`); execution blocked in the current environment (`dotnet` unavailable)
+**Threat model update:** Complete (T35 + M-4)
 
 ### Review and design scope
 
@@ -334,15 +334,15 @@ Evaluate:
 
 ### Step completion record
 
-For each Phase 5 step, add a subsection here containing:
+#### Step 7 — Runtime code-integrity gate (manifest + streaming verifier + fail-closed startup enforcement)
 
-- **Status:**
-- **What changed:**
-- **Affected files:**
-- **Tests performed and results:**
-- **Code review:**
-- **Threat model update:**
-- **Remaining risks:**
+- **Status:** Implementation complete; automated execution pending a .NET 8 SDK environment. Phase 5 remains In progress until the new suite executes there.
+- **What changed:** Added a fail-closed runtime code-integrity subsystem (M-4). A `CodeIntegrityManifest` (expected lowercase-hex SHA-256 per protected component) and a `CodeIntegrityVerifier` (streaming hash, deterministic `Ok/Missing/Tampered/Unreadable` outcomes, `IsSatisfied` only when every component verifies) live in SSP.Core (BCL only). `RuntimeCodeIntegrity` (SSP.Server) is the armed startup gate: it loads the release baseline from the embedded manifest resource, and `SspRuntimeLicense.CreateForService` calls `VerifyArmedStartup` before any licensing composition, so **both** protected-service start paths — the SCM path (`SspWindowsService.OnStart`) and the foreground `--run-once` path (`Program.RunServiceModeAsync`) — refuse to start when a protected on-disk runtime component is missing, tampered, or unreadable. On failure it raises a credential-free `[security] event=CodeIntegrityVerificationFailed` line and throws `SspActivationException` (reason `code_integrity_failure`); the existing EP1 failure channel (`ServiceDiagnostics` startup log + Windows Application log) persists it. A build that is **not armed** (no embedded manifest — the default for every developer/CI/test build) is an explicit no-op: the compiled-in trust anchor + signed license remain the only gate, so existing behaviour and the 685-suite unaffected. Arming is a release ceremony seam mirroring `SspTrustAnchor.targets`: `Activation/SspCodeIntegrity.targets` (imported by `SSP.Server.csproj`) embeds an operator-supplied JSON manifest under `SSP.CodeIntegrity.manifest.json`, enforces it with `-p:SspRequireCodeIntegrity=true`, and propagates `SspCodeIntegrityPublishArgs` into the standalone `SSP.ServiceHost` publish so the extracted per-service host image carries the same baseline. `RuntimeCodeIntegrity.BuildManifestFromFiles` computes a baseline over pristine files (release/ceremony helper, also pinned by tests). Fail-closed reason constants (`code_integrity_failure`, `code_integrity_manifest_invalid`) were added to `SspActivationException`. No client package, wire-protocol, RSA-PSS, licensing, or network change; offline operation preserved.
+- **Affected files:** `src/SSP.Core/CodeIntegrity/CodeIntegrityManifest.cs` (new); `src/SSP.Core/CodeIntegrity/CodeIntegrityVerifier.cs` (new); `src/SSP.Server/Activation/RuntimeCodeIntegrity.cs` (new); `src/SSP.Server/Activation/SspCodeIntegrity.targets` (new); `src/SSP.Server/SSP.Server.csproj`; `src/SSP.Server/Activation/SspRuntimeLicense.cs`; `src/SSP.Server/Activation/ISspLicenseGate.cs` (reason constants); `tests/SSP.Tests/RuntimeCodeIntegrityTests.cs` (new); `docs/THREAT_MODEL.md`; `BUILD.md`; `Security Correction.md`.
+- **Tests performed and results:** `dotnet test` — **blocked before execution**: `dotnet: command not found` in this environment and every .NET SDK/feed endpoint is unreachable, so neither `dotnet build` nor `dotnet test` could run here. `git diff --check` — **passed** with no whitespace errors. Static source verification: brace/paren balance across all new/edited files; each new name resolves to a defined type/namespace (`SSP.Core.CodeIntegrity` public, consumed by `SSP.Server`; `RuntimeCodeIntegrity` internal visible to `SSP.Tests` via the existing `InternalsVisibleTo`); `SSP.Server`/`SSP.Core`/`SSP.Tests` do **not** set `TreatWarningsAsErrors` (only `SSP.Activation`/`SSP.Activation.Tests` do, and neither is touched), so the risk of an analyzer/escalated-warning break is limited to compile errors, which are checked by API/namespace trace; the JSON (de)serializer is implemented on `Utf8JsonWriter`/`JsonDocument` (no serializer DTO-instantiation ambiguity). New test names (13): `Verify_PristineComponents_IsSatisfied`, `Verify_TamperedComponent_IsDetectedAndNotSatisfied`, `Verify_MissingComponent_FailsClosed`, `Verify_ComponentOutsideRoot_NeverReadsArbitraryFiles`, `Verify_UnreadableComponent_IsAFailure_NotAnException`, `ManifestSerializer_RoundTripsLosslessly`, `ManifestSerializer_MalformedJson_ReturnsNull`, `GuardStartup_Pristine_DoesNotThrow`, `GuardStartup_TamperedComponent_RefusesProtectedService_FailClosed`, `GuardStartup_MissingComponent_RefusesProtectedService_FailClosed`, `GuardStartup_EmptyManifest_IsANoOp_NotArmedBuildsProceed`, `CeremonyHelper_BuildManifestFromFiles_ThenGuardDetectsTampering`. Automated test status remains Blocked in this environment; the new suite must run on the .NET 8 SDK host alongside the existing 685.
+- **Code review:** Self-review complete — the verifier never throws for a missing/unreadable/tampered file (each becomes a failed outcome, so a tampered component can never accidentally let a caller continue); the aggregate `IsSatisfied` is satisfiable only when the manifest is non-empty and every component is Ok; path containment prevents a malformed manifest from reading files outside the verification root; an un-armed build is byte-for-byte a no-op (only an embedded release baseline arms the gate), so no existing test/start path changes; the gate runs before any licensing composition in the single factory every protected-service start path shares; events carry no credentials and the security line + the EP1 `ServiceDiagnostics` channel persist the refusal; no private key, wire-protocol, network, or RSA-PSS change.
+- **Threat model update:** Complete — T35 (patch `SSP.Server`/`SSP.ServiceHost`/runtime assemblies to bypass enforcement; M-4) added with the mitigation and test evidence; asset table, §8 known limitations and §9 residual risks updated (in particular: in-process self-verification cannot certify the shipping single-file image itself — that remains the signed-image/OS-loader control).
+- **Remaining risks:** The new suite must execute under .NET 8 (this phase and prior phases). Fundamental residual (documented in the threat model §9): a fully privileged local administrator who patches the running binary can also remove or re-arm the integrity gate, so in-process integrity detects tampering and fails closed but is not tamper-proof against a determined root — fully closing that class needs Authenticode/signed images validated by the OS loader (the release signing seam) and/or TPM. Arming is operator-performed at the release ceremony (like the trust anchor); a dev/CI build ships un-armed by design and relies on the existing licensing fail-closed gate. Provisioning (SETUP MODE) uses `TryCreateForProvisioning`, which is not separately integrity-gated in this step (it runs no protected service); the EP0a/EP1 start path is gated. Phase 6 (clock) remains Not started.
 
 ---
 

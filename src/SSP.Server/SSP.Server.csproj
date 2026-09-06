@@ -8,6 +8,15 @@
     TRUST_ANCHOR_KEY_CEREMONY.md.
   -->
   <Import Project="Activation\SspTrustAnchor.targets" />
+  <!--
+    RUNTIME CODE-INTEGRITY SEAM (Phase 5 / M-4). Opt-in, at release time only:
+    embeds the operator-supplied code-integrity JSON manifest (expected SHA-256
+    over the protected on-disk runtime components) into SSP.Server.dll and, via
+    SspCodeIntegrityPublishArgs, into the standalone SSP.ServiceHost image.
+    Developer/CI builds embed nothing (not armed). See the file header and
+    Security Correction.md Phase 5.
+  -->
+  <Import Project="Activation\SspCodeIntegrity.targets" />
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -215,7 +224,7 @@
           BeforeTargets="CoreCompile"
           Condition="'$(DesignTimeBuild)' != 'true' AND '$(SSP_SKIP_EMBED_EFFECTIVE)' != 'true'">
 
-    <Exec Command="dotnet publish &quot;$(ServiceHostProjectDir)/SSP.ServiceHost.csproj&quot; -c $(Configuration) -f net8.0 -r win-x64 -o &quot;$(ServiceHostPublishDir)&quot; /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true /p:IncludeAllContentForSelfExtract=true /p:EnableCompressionInSingleFile=false /p:DebugType=embedded /p:DesignTimeBuild=false /p:SSP_SKIP_EMBED=true$(SspTrustAnchorPublishArgs)"
+    <Exec Command="dotnet publish &quot;$(ServiceHostProjectDir)/SSP.ServiceHost.csproj&quot; -c $(Configuration) -f net8.0 -r win-x64 -o &quot;$(ServiceHostPublishDir)&quot; /p:PublishSingleFile=true /p:SelfContained=true /p:IncludeNativeLibrariesForSelfExtract=true /p:IncludeAllContentForSelfExtract=true /p:EnableCompressionInSingleFile=false /p:DebugType=embedded /p:DesignTimeBuild=false /p:SSP_SKIP_EMBED=true$(SspTrustAnchorPublishArgs)$(SspCodeIntegrityPublishArgs)"
           ConsoleToMSBuild="true" />
 
     <Error Condition="!Exists('$(ServiceHostExePath)')"

@@ -1,0 +1,121 @@
+<!--
+  ============================================================================
+  SSP Runtime Code-Integrity baseline: RELEASE-TIME PROVISIONING
+  ============================================================================
+
+  Imported by src/SSP.Server/SSP.Server.csproj. This is the ONLY mechanism by
+  which a runtime code-integrity baseline enters an SSP binary (roadmap Phase 5 /
+  M-4). It mirrors SspTrustAnchor.targets exactly: a release operator supplies a
+  JSON manifest (expected SHA-256 over the protected on-disk runtime components)
+  and this file embeds it verbatim into SSP.Server.dll (and, through the nested
+  publish arguments below, into the standalone SSP.ServiceHost image) as the
+  manifest resource
+
+      SSP.Server.CodeIntegrity.manifest.json
+
+  SspRuntimeLicense.CreateForService -> RuntimeCodeIntegrity.VerifyArmedStartup
+  reads only that compiled-in resource at protected-service startup and refuses
+  to start a service when a listed component is missing, tampered or unreadable.
+
+  WHEN IT DOES NOTHING (the default - every developer build and CI)
+  =================================================================
+  A build that does not pass SspCodeIntegrityManifestFile embeds NO manifest.
+  RuntimeCodeIntegrity is then not armed: VerifyArmedStartup is a no-op and the
+  licensing fail-closed gate (compiled-in trust anchor + signed license) is the
+  only authority. This keeps normal `dotnet build` / `dotnet test` byte- and
+  behaviour-identical.
+
+  PROPERTIES (supplied at release time; never checked in)
+  ========================================================
+    SspCodeIntegrityManifestFile
+        Path to a code-integrity JSON manifest. The JSON is the serialized
+        CodeIntegrityManifest from SSP.Core (logicalName/fileName/sha256 per
+        component; see SSP.Core/CodeIntegrity/CodeIntegrityManifest.cs and the
+        serializer round-trip test). It should name, under the process base
+        directory of the deployed image, the on-disk protected runtime
+        components a protected service runs. Produced by an operator on a
+        pristine build using the SSP.Core hashing helper, or crafted to the same
+        schema.
+
+    SspRequireCodeIntegrity
+        Set to true for every release/publish pipeline that ships a protected
+        runtime. The build FAILS when no manifest was supplied, so an un-armed
+        binary can never be shipped by accident.
+
+  RELEASE COMMAND (alongside the trust-anchor ceremony)
+  ======================================================
+    dotnet publish src/SSP.Server/SSP.Server.csproj -c Release ^
+        -p:PublishSingleFile=true ^
+        -p:SspRequireTrustAnchor=true ^
+        -p:SspAuthorityPublicKeyPemFile=D:\ceremony\ssp-authority-public.pem ^
+        -p:SspAuthorityPublicKeySha256=<fingerprint> ^
+        -p:SspRequireCodeIntegrity=true ^
+        -p:SspCodeIntegrityManifestFile=D:\ceremony\ssp-code-integrity.json
+
+  WHAT MUST NEVER HAPPEN HERE
+  ===========================
+  * No runtime substitution. There is deliberately no environment variable, app
+    setting, config file or CLI switch that supplies the baseline to a running
+    SSP process. The only input that can relax code-integrity is re-signing and
+    re-shipping the binary.
+  * No baseline in the repository. Nothing under src/ or tests/ may contain the
+    production manifest; the ceremony passes a path to a file that lives outside
+    the working tree, exactly like the trust-anchor PEM.
+-->
+<Project>
+
+  <PropertyGroup>
+    <!-- Kept in sync with RuntimeCodeIntegrity.ManifestResourceName. -->
+    <SspCodeIntegrityManifestResourceName>SSP.Server.CodeIntegrity.manifest.json</SspCodeIntegrityManifestResourceName>
+
+    <!-- Normalise a relative ceremony path against the project directory. -->
+    <SspCodeIntegrityManifestFile Condition="'$(SspCodeIntegrityManifestFile)' != ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(SspCodeIntegrityManifestFile)'))</SspCodeIntegrityManifestFile>
+
+    <SspCodeIntegrityProvisioned Condition="'$(SspCodeIntegrityManifestFile)' != ''">true</SspCodeIntegrityProvisioned>
+    <SspCodeIntegrityProvisioned Condition="'$(SspCodeIntegrityProvisioned)' == ''">false</SspCodeIntegrityProvisioned>
+  </PropertyGroup>
+
+  <!--
+    The nested single-file publishes (PublishClientTemplate / PublishServiceHostTemplate)
+    are separate MSBuild processes, so global properties do NOT flow in automatically.
+    The standalone SSP.ServiceHost image embeds SSP.Server.dll and IS the binary an
+    installed SSP service runs, so it must carry the same manifest; otherwise a release
+    would ship a setup executable that arms integrity and a service host that never
+    verifies it.
+  -->
+  <PropertyGroup>
+    <SspCodeIntegrityPublishArgs></SspCodeIntegrityPublishArgs>
+    <SspCodeIntegrityPublishArgs Condition="'$(SspCodeIntegrityManifestFile)' != ''">$(SspCodeIntegrityPublishArgs) /p:SspCodeIntegrityManifestFile=&quot;$(SspCodeIntegrityManifestFile)&quot;</SspCodeIntegrityPublishArgs>
+    <SspCodeIntegrityPublishArgs Condition="'$(SspRequireCodeIntegrity)' == 'true'">$(SspCodeIntegrityPublishArgs) /p:SspRequireCodeIntegrity=true</SspCodeIntegrityPublishArgs>
+  </PropertyGroup>
+
+  <!-- The baseline itself: embedded verbatim, inside the assembly image. -->
+  <ItemGroup Condition="'$(SspCodeIntegrityProvisioned)' == 'true' AND Exists('$(SspCodeIntegrityManifestFile)')">
+    <EmbeddedResource Include="$(SspCodeIntegrityManifestFile)">
+      <LogicalName>$(SspCodeIntegrityManifestResourceName)</LogicalName>
+      <Visible>false</Visible>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <Target Name="ValidateSspCodeIntegrityProvisioning"
+          BeforeTargets="BeforeBuild"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+
+    <Error Condition="'$(SspRequireCodeIntegrity)' == 'true' AND '$(SspCodeIntegrityProvisioned)' != 'true'"
+           Code="SSPCI001"
+           Text="This build requires a runtime code-integrity manifest (SspRequireCodeIntegrity=true) but none was supplied. Pass -p:SspCodeIntegrityManifestFile=&lt;path to the code-integrity JSON&gt; from the release ceremony. See SspCodeIntegrity.targets / BUILD.md." />
+
+    <Error Condition="'$(SspCodeIntegrityProvisioned)' == 'true' AND !Exists('$(SspCodeIntegrityManifestFile)')"
+           Code="SSPCI002"
+           Text="SspCodeIntegrityManifestFile was set to '$(SspCodeIntegrityManifestFile)' but no such file exists. The runtime code-integrity baseline cannot be provisioned." />
+
+    <Message Condition="'$(SspCodeIntegrityProvisioned)' == 'true'"
+             Importance="high"
+             Text="[SSP.Server] Runtime code-integrity baseline provisioned from $(SspCodeIntegrityManifestFile) as resource $(SspCodeIntegrityManifestResourceName)" />
+
+    <Message Condition="'$(SspCodeIntegrityProvisioned)' != 'true'"
+             Importance="normal"
+             Text="[SSP.Server] No runtime code-integrity baseline provisioned: this build is not armed. Protected services are gated by the compiled-in trust anchor and signed license only. Release builds should pass -p:SspRequireCodeIntegrity=true -p:SspCodeIntegrityManifestFile=..." />
+  </Target>
+
+</Project>
