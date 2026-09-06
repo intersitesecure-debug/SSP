@@ -10,12 +10,13 @@
 // the test process cannot stand in for a holder in another process: the probe
 // therefore runs as a genuine child process.
 //
-// The parent starts the probe with `dotnet exec <this assembly>`. The
-// assembly entry point begins executing immediately - there is no VSTest
-// adapter discovery and no test enumeration to wait through - so the probe
-// holds the lease a moment after launch instead of after a full child
-// testhost boot. (The previous filtered `dotnet vstest` child was the reason
-// the test could exceed its Fact timeout on a loaded machine.)
+// The parent starts the probe by launching this assembly's apphost (the Exe
+// produced because OutputType=Exe), falling back to `dotnet exec -- <dll>`.
+// It must never launch testhost via DOTNET_HOST_PATH: testhost waits for a
+// VSTest runner that never connects, which is what used to push the test
+// past its Fact timeout. The assembly entry point begins executing
+// immediately - there is no VSTest adapter discovery and no test enumeration
+// to wait through.
 //
 // The probe never reads or writes license state: it only acquires the lease
 // file and speaks the pipe handshake.
@@ -32,18 +33,21 @@ internal static class ClockLockProbe
     /// <summary>First argument that selects the lock-probe mode.</summary>
     internal const string Command = "--clock-lock-probe";
 
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
     internal static int Main(string[] args)
     {
-        if (args.Length != 3 || !string.Equals(args[0], Command, StringComparison.Ordinal))
+        var filtered = args.Where(argument => argument != "--").ToArray();
+        if (filtered.Length != 3 || !string.Equals(filtered[0], Command, StringComparison.Ordinal))
         {
             Console.Error.WriteLine(
-                $"Usage: dotnet exec {typeof(ClockLockProbe).Assembly.GetName().Name}.dll {Command} <pipeName> <statePath>");
+                $"Usage: {typeof(ClockLockProbe).Assembly.GetName().Name} {Command} <pipeName> <statePath>");
             return 2;
         }
 
         try
         {
-            Run(args[1], args[2]);
+            Run(filtered[1], filtered[2]);
             return 0;
         }
         catch (Exception ex)
@@ -62,14 +66,16 @@ internal static class ClockLockProbe
     /// </summary>
     private static void Run(string pipeName, string statePath)
     {
-        using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
+        using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
         pipe.Connect(60_000);
-        using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
-        using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
+        using var reader = new StreamReader(pipe, Utf8NoBom, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+        using var writer = new StreamWriter(pipe, Utf8NoBom, bufferSize: 1024, leaveOpen: true) { AutoFlush = true };
         // Synchronous lease: acquire and dispose on the same thread, no await.
         using var lease = ((ILicenseTimeStateLock)new SspLicenseStateStore(statePath)).AcquireTimeStateLock();
         writer.WriteLine("locked");
-        var release = reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(120)).GetAwaiter().GetResult();
+        writer.Flush();
+        using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        var release = reader.ReadLineAsync(releaseTimeout.Token).AsTask().GetAwaiter().GetResult();
         if (!string.Equals(release, "release", StringComparison.Ordinal))
         {
             throw new InvalidDataException($"Unexpected control message: {release ?? "<null>"}");

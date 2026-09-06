@@ -8,13 +8,15 @@
     <!--
       Executable so the assembly carries the entry point used by
       ClockRollbackStateTests.FileLease_IsExclusiveAcrossProcesses: the test
-      starts a real second process with `dotnet exec <this assembly>`, which
-      acquires the production cross-process lease through the public
-      ILicenseTimeStateLock seam. `dotnet exec` needs the runtimeconfig.json
-      that only an Exe emits, and the probe must start without the adapter
-      discovery/test enumeration of a second `dotnet vstest` host (which is
-      what used to push the test past its Fact timeout). VSTest still
-      discovers and runs the tests in this assembly normally.
+      starts a real second process by launching this project's apphost (or
+      `dotnet exec -- <this assembly>`), which acquires the production
+      cross-process lease through the public ILicenseTimeStateLock seam.
+      OutputType=Exe emits both the apphost and the runtimeconfig.json
+      `dotnet exec` needs. The probe must start without the adapter
+      discovery/test enumeration of a second `dotnet vstest` host, and must
+      not reuse DOTNET_HOST_PATH when that variable points at testhost
+      (both of those used to push the test past its Fact timeout). VSTest
+      still discovers and runs the tests in this assembly normally.
     -->
     <OutputType>Exe</OutputType>
 
@@ -34,7 +36,8 @@
       contract and keeps the build unambiguous even if some future package
       contributes another Main. Neither property affects test discovery -
       VSTest loads the assembly through testhost and never calls the entry
-      point; only the child process started with `dotnet exec` does.
+      point; only the child process started as this apphost (or `dotnet exec`)
+      does.
     -->
     <GenerateProgramFile>false</GenerateProgramFile>
     <StartupObject>SSP.Tests.Activation.ClockLockProbe</StartupObject>

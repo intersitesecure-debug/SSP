@@ -92,8 +92,12 @@ Facts:
   the cross-process lease (`SspLicenseStateFileLock`) from a *genuine* second
   process — the lease is reentrant per thread and its acquisition map is
   thread-local, so another thread cannot stand in for another process. The
-  test starts `dotnet exec SSP.Tests.dll --clock-lock-probe …`, which needs
-  the `runtimeconfig.json` that only an `Exe` emits. That entry point is
+  test launches this project's apphost (`SSP.Tests.exe` / `SSP.Tests`) with
+  `--clock-lock-probe …`, falling back to `dotnet exec -- SSP.Tests.dll`
+  when the apphost is missing. It needs the `runtimeconfig.json` that only
+  an `Exe` emits, and it must not start testhost via `DOTNET_HOST_PATH`
+  (under `dotnet test` that variable can name testhost, which waits for a
+  runner that never connects). That entry point is
   `tests/SSP.Tests/Activation/ClockLockProbe.cs`.
 * `Microsoft.NET.Test.Sdk` *also* contributes an entry point to every C# test
   project: it generates `obj/<cfg>/<tfm>/SSP.Tests.Program.cs` containing
