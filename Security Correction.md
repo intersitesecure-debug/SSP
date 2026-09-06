@@ -1,6 +1,6 @@
 # SSP Security Corrections Roadmap
 
-**Status:** Active — Phase 3 implemented; automated validation blocked because the .NET SDK is unavailable in the current environment
+**Status:** Active — Phases 1–3 complete and merged (full suite 658/658 passed on the merged branch); Phase 4 implemented (Steps 4–6), awaiting automated validation in a .NET 8 SDK environment
 **Authority:** This document is the source of truth for SSP security hardening work.  
 **Execution order:** Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6  
 **Last updated:** 2026-09-05
@@ -32,10 +32,10 @@
 
 | Phase | Correction | Status | Code review | Automated tests | Threat model update |
 |---|---|---|---|---|---|
-| 1 | Enrollment Authentication Code Protection (M-1) | In progress | Complete (self-review) | Blocked — `dotnet` unavailable | Complete |
-| 2 | Authentication Abuse Resistance (remaining M-1) | In progress | Complete (self-review) | Blocked — `dotnet` unavailable | Complete |
-| 3 | Client Private Key Protection (M-2) | In progress | Complete (self-review) | Blocked — `dotnet` unavailable | Complete |
-| 4 | License State Anti-Rollback Protection (M-3) | Not started | Not started | Not started | Not started |
+| 1 | Enrollment Authentication Code Protection (M-1) | Complete | Complete (self-review) | Passed (658/658 post-merge) | Complete |
+| 2 | Authentication Abuse Resistance (remaining M-1) | Complete | Complete (self-review) | Passed (658/658 post-merge) | Complete |
+| 3 | Client Private Key Protection (M-2) | Complete | Complete (self-review) | Passed (658/658 post-merge) | Complete |
+| 4 | License State Anti-Rollback Protection (M-3) | In progress — implementation complete (Steps 4–6) | Complete (self-review) | Blocked in current environment — `dotnet` unavailable; 27 tests written | Complete |
 | 5 | Runtime Code Integrity Protection (M-4) | Not started | Not started | Not started | Not started |
 | 6 | Clock Rollback Protection (M-6) | Not started | Not started | Not started | Not started |
 
@@ -75,16 +75,41 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 - **Tests performed:** `dotnet test tests/SSP.Tests/SSP.Tests.csproj --filter FullyQualifiedName~SSP.Tests.ClientIdentityKeyProtectionTests --no-restore` — **blocked before execution**: `/bin/bash: dotnet: command not found`; `dot.net`, `builds.dotnet.microsoft.com`, `dotnet.microsoft.com` and `nuget.org` all unreachable from this environment (`SSL_ERROR_SYSCALL` / connection refused), so the SDK cannot be installed. `git diff --check` — **passed** with no whitespace errors. Static source verification confirmed: the CurrentUser scope constant and all six client-side `PemStore` call sites plus both `ClientConnectionState` defaults and the legacy-PEM migration pass it; the four envelope algorithm bytes (1/2 LocalMachine, 3/4 CurrentUser) and `GetEnvelopeScope` exist; envelope scope is authoritative for decryption; the re-wrap migration is best-effort while plaintext migration keeps its pre-existing contract; and no server-side file (`ConfigStore.cs`, `SspLicenseStateStore.cs`, `ServerProtocol.cs`, `SetupEngine.cs`, `Program.cs`, `SspWindowsService.cs`) was modified. All six new test methods are present and reference only existing APIs. Automated test status remains Blocked, not Passed.
 - **Remaining risks:** The automated Phase 3 tests (and the full existing suite) must be run in a .NET 8 SDK environment before this phase can be marked Complete. DPAPI CurrentUser binds the client identity to the creating user's profile: if that user account is deleted or its password changed such that the old DPAPI master key is unreachable, the connection's identity is unrecoverable and the connection must be re-provisioned offline with a new OTT/package (accepted trade-off, documented in the threat model). A non-admin local user can still read the encrypted file bytes; extraction now additionally requires defeating the user-scoped DPAPI master key (memory-inspection/debugging class, accepted residual risk in the threat model). The same LocalMachine-scope exposure on the server-side `.sysdata.bin` (server private key) is out of Phase 3 scope and recorded as a remaining risk. Phase 4 (anti-rollback), Phase 5 (code integrity) and Phase 6 (clock) remain Not started.
 
+### Step 4 — Phase 4 implementation (part 1): installation binding + monotonic state epoch
+
+- **Status:** Implementation complete; automated validation blocked in the current environment (`dotnet` unavailable). Phase 4 remains In progress — the redundant witness (Step 5) and the enrollment-state application (Step 6) follow.
+- **What changed:** `LicenseStateRecord` gained two optional, restrict-only fields: `InstallationId` (the domain-separated installation identity the persisted license state is bound to) and `StateEpoch` (a monotonic write counter). `SspLicenseStateStore.Save` stamps the binding (adopting legacy pre-Phase-4 records on their first save) and advances the epoch as `max(record, on-disk) + 1`, so a cross-process last-writer-wins save can never move the counter backwards. `SspLicenseStateStore.Load` fails closed (`InvalidDataException` → `state_store_unavailable` → deny) when a record names a *different* installation — replaying another machine's (or another installation's) state can no longer silently replace this installation's floor. `SspInstallationIdentityProvider` gained `GetLicenseStateBindingId()` (SHA-256 over the same MachineGuid with the new `SspLicensing.LicenseStateBindingPurposeTag`; null on hosts without a machine identity, mirroring the license-binding semantics), and the production composition (`SspActivationService.Create`) passes it into the store. The single-argument `SspLicenseStateStore(path)` constructor and every existing call site compile and behave unchanged except for the added stamps; unbound stores (no binding id configured) keep the exact pre-Phase-4 behaviour. Four new tests pin the stamping, the foreign-record fail-closed path, the unbound compatibility path, and the legacy adoption/upgrade path.
+- **Affected files:** `src/SSP.Activation/Models/LicenseStateRecord.cs`; `src/SSP.Core/Activation/SspLicensing.cs`; `src/SSP.Server/Activation/SspInstallationIdentityProvider.cs`; `src/SSP.Server/Activation/SspLicenseStateStore.cs`; `src/SSP.Server/Activation/SspActivationService.cs`; `tests/SSP.Tests/Activation/SspLicenseStateStoreTests.cs`; `docs/THREAT_MODEL.md` (Step 4 notes); `Security Correction.md`.
+- **Tests performed:** `dotnet test` — **blocked before execution**: `dotnet: command not found` in this environment (all .NET endpoints unreachable). `git diff --check` — passed. Static verification: constructor default parameters preserve every existing single-argument call site; the record's new fields are nullable/defaulted so legacy JSON deserializes unchanged; the epoch stamp is `Math.Max`-based and cannot regress; the binding check only fires when both the store and the record carry a binding. Automated test status remains Blocked in this environment; the new tests must run in the .NET 8 SDK environment (Step 4 test names: `Save_StampsInstallationBindingAndMonotonicEpoch`, `Load_FailsClosed_WhenRecordBoundToAnotherInstallation`, `Load_WithoutConfiguredBinding_AcceptsAnyRecord`, `LegacyRecord_WithoutBinding_IsAdoptedAndUpgradedOnSave`).
+- **Remaining risks:** Binding alone does not detect deletion or rollback of the state *file* (a rolled-back copy of this installation's own record still carries this installation's binding) — that is Step 5's witness. Clock-based rollback detection remains excluded (Phase 6).
+
+### Step 5 — Phase 4 implementation (part 2): redundant witness with deletion recovery and rollback detection
+
+- **Status:** Implementation complete; automated validation blocked in the current environment (`dotnet` unavailable). Phase 4 remains In progress — the enrollment-state application (Step 6) follows.
+- **What changed:** A redundant, envelope-encrypted **witness** of the monotonic license-state values (installation binding, state epoch, highest accepted floor, last-accepted and activated license ids) is now maintained OUTSIDE the licensing directory, one level above it (`.ssp-state-witness/license/{sha256(directory)}/.witness.dat`; helper `SspStateWitnessPaths` in SSP.Core.IO, file name registered in `ProtectedFileStore` so every witness is encrypted at rest). `SspLicenseStateStore.Load` now: (a) reads the witness first and fails closed when it is corrupt, undecryptable, plaintext or bound to a different installation; (b) treats a **missing state file with an intact witness as a deletion attempt** — the floor and activation state are recovered from the witness (a durable lower bound; it can only restrict), `LicenseStateDeletionRecovered` is reported, and the machine is NOT treated as freshly installed; (c) treats a **state file whose epoch is lower than the witnessed epoch as a rollback** — the load fails closed and `LicenseStateRollbackDetected` is reported. `Save` writes the primary first and then max-merges the witness (never regressing epoch or floor); the witness write is best effort because a lagging witness is the safe direction. Two new credential-free event types (`LicenseStateRollbackDetected` = 14, `LicenseStateDeletionRecovered` = 15, both Warning in the reviewed event-log taxonomy, ids 4614/4615) carry the detections; the taxonomy tests were extended accordingly. The production composition passes the event sink, clock and canonical witness path into the store, and `--license-status`/`DescribeStatus` reports the witness path. A missing witness is never a violation (the primary stays authoritative and the next save re-establishes it). Fourteen new tests pin deletion recovery (floor + activation state, twice), rollback fail-closed (unit + end-to-end), the corrupt/plaintext/foreign-witness fail-closed paths, witness monotonicity, witness encryption at rest, fresh-install behaviour, missing-witness-is-no-violation, path-derivation consistency, and the three end-to-end scenarios (deleted-state revival denied; rolled-back state fails closed and denies a tunnel; a NEWER license still recovers after a deletion attempt — fail-closed without bricking).
+- **Affected files:** `src/SSP.Core/IO/ProtectedFileStore.cs`; `src/SSP.Core/IO/StateWitnessPaths.cs` (new); `src/SSP.Server/Activation/SspLicenseStateWitness.cs` (new); `src/SSP.Server/Activation/SspLicenseStateStore.cs`; `src/SSP.Server/Activation/SspLicensePaths.cs`; `src/SSP.Server/Activation/SspActivationService.cs`; `src/SSP.Activation/Models/LicenseSecurityEvent.cs`; `src/SSP.Server/Activation/SspSecurityEventSink.cs`; `tests/SSP.Tests/Activation/LicenseStateAntiRollbackTests.cs` (new); `tests/SSP.Tests/Activation/SspSecurityEventSinkTaxonomyTests.cs`; `docs/THREAT_MODEL.md`; `Security Correction.md`.
+- **Tests performed:** `dotnet test` — **blocked before execution**: `dotnet: command not found` in this environment. `git diff --check` — passed. Static verification: every existing single-argument `SspLicenseStateStore(path)` call site compiles unchanged (all new parameters are optional); the witness file name is in `ProtectedFileNames` so witnesses are encrypted at rest on every platform; the epoch/rollback rule is strict-inequality only (equal epochs with different floors — the legitimate cross-process race — never trip detection); deletion recovery returns a restrict-only lower bound and the signed artifact remains the root of trust; the two new enum members are covered by the exhaustive taxonomy switch and the vocabulary pin (13→15). Automated test status remains Blocked in this environment; the new tests must run in the .NET 8 SDK environment.
+- **Remaining risks:** A local administrator who restores/reconstructs BOTH the licensing directory AND the witness tree (or the whole machine/product-root state) still resets the floor — the documented coordinated-rollback residual (software-only, offline; needs TPM/trusted time to eliminate). The witness write is best effort: a persistently failing witness write disables deletion detection without any other effect. Cross-process last-writer-wins races can transiently under-report the floor until the next save max-merges (pre-existing class, unchanged). Clock-based rollback detection remains excluded (Phase 6).
+
+
+### Step 6 — Phase 4 implementation (part 3): enrollment-state anti-rollback (Phase 1/2 state)
+
+- **Status:** Implementation complete; automated validation blocked in the current environment (`dotnet` unavailable). This completes the Phase 4 implementation; the phase can be marked Complete after code review and automated execution in a .NET 8 SDK environment.
+- **What changed:** The same witness pattern is applied to the enrollment abuse state the Phase 1/2 controls persist in the service `.cache.dat` — the file Steps 1 and 2 explicitly deferred to Phase 4. A new enrollment witness (`.ssp-state-witness/enrollment/{sha256(service-dir)}/.witness.dat`, encrypted at rest, outside the service directory) durably remembers, per hashed OTT: the highest failed-Authentication-Code count, the latest cooldown instant, and the sticky *revoked* and *consumed* verdicts. `ServerProtocol` now: (a) loads the witness on every enrollment attempt and fails closed (rejection + `Enrollment.StateWitnessUnavailable`) when it is corrupt, undecryptable, plaintext or foreign; (b) rejects an OTT the witness records as revoked or consumed — restoring an old `.cache.dat` can no longer resurrect a revoked OTT or re-spend a consumed one (`Enrollment.StateRollbackDetected`); (c) clamps the Phase 2 cooldown to the later of the config and witnessed retry instants — a rollback cannot shrink the cooldown; (d) counts every new wrong code against everything ever witnessed (`effective = max(config-counter, witnessed+1)`), so a rolled-back counter revokes on the very next wrong code instead of buying fresh guesses, and heals the config counter to the effective value; (e) records revocation/consumption in the witness after `.cache.dat` is persisted (config first, witness second — a crash leaves the witness lagging, which is the safe direction; witness writes are best effort with a `Enrollment.StateWitnessWriteFailed` diagnostic). The `EnrollmentCooldown` test helper now applies its simulated clock change to the witness as well, so the Phase 2 cooldown tests keep testing exactly what they tested before (elapsed time), no more. Nine new tests simulate the attack the way an administrator would perform it — a byte copy of `.cache.dat` written back over the current file — and pin: revocation is final, the next wrong code after a counter rollback revokes immediately, the witnessed cooldown cannot be shrunk, a consumed OTT cannot enroll twice, a corrupt witness fails enrollment closed, consumption/revocation are witnessed, the witness is encrypted at rest, and a fresh service without a witness enrolls normally (no false positives).
+- **Affected files:** `src/SSP.Server/Runtime/EnrollmentStateWitness.cs` (new); `src/SSP.Server/Runtime/ServerProtocol.cs`; `tests/SSP.Tests/EnrollmentStateAntiRollbackTests.cs` (new); `tests/SSP.Tests/Helpers/EnrollmentCooldown.cs` (witness-aware simulated clock change); `docs/THREAT_MODEL.md`; `Security Correction.md`.
+- **Tests performed:** `dotnet test` — **blocked before execution**: `dotnet: command not found` in this environment. `git diff --check` — passed. Static verification: the effective-count formula `max(config-counter, witnessed+1)` was re-derived against the normal, crashed-witness-lag and post-rollback sequences (normal flow values are identical to pre-Phase-4 in every non-rollback case, so the Phase 1/2 F4 assertions hold unchanged: failure 1 → 1, failure 2 → 2, failure 3 → revoked; after a counter rollback to 0 with 2 witnessed failures, the next wrong code yields max(1, 3) = 3 → revoked); the pre-check runs after the OTT/config match and before signature verification, code generation and the EP2 licensing gate (no licensing-state leak, no behavior change for unknown OTTs); the witness stores only hashed OTT keys, counts, ISO timestamps and booleans (no OTT plaintext, code, key or fingerprint — same credential-free class as the Phase 1/2 events). Automated test status remains Blocked in this environment.
+- **Remaining risks:** An administrator who restores BOTH the service directory AND the witness tree defeats the enrollment memory too (the same coordinated-rollback residual as the license state). A crash between the config and witness writes leaves the witness one step behind (safe direction; the next failure max-merges). Host-clock changes still shift cooldowns (Phase 6).
+
 ---
 
 # Phase 1 — Enrollment Authentication Code Protection (M-1)
 
 **Goal:** Prevent brute-force attempts against the 10-digit Authentication Code used during client enrollment.
 
-**Phase status:** In progress — implementation complete; automated validation blocked
-**Current step:** Step 1 — awaiting execution in a .NET 8 SDK environment
+**Phase status:** Complete — merged; the full suite (658/658, including the Phase 1 tests) passed on the merge branch in a .NET 8 SDK environment
+**Current step:** None (phase complete)
 **Code review:** Complete (self-review)
-**Automated tests:** Blocked — `dotnet` is unavailable in the current environment
+**Automated tests:** Passed (658/658 post-merge validation)
 **Threat model update:** Complete
 
 ### Required implementation
@@ -128,10 +153,10 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 
 **Goal:** Review and improve Authentication Code resistance while remaining fully offline.
 
-**Phase status:** In progress — implementation complete; automated validation blocked
-**Current step:** Step 2 — awaiting execution in a .NET 8 SDK environment
+**Phase status:** Complete — merged; the full suite (658/658, including the Phase 2 tests) passed on the merge branch in a .NET 8 SDK environment
+**Current step:** None (phase complete)
 **Code review:** Complete (self-review)
-**Automated tests:** Blocked — `dotnet` is unavailable in the current environment
+**Automated tests:** Passed (658/658 post-merge validation)
 **Threat model update:** Complete
 
 ### Review scope
@@ -166,10 +191,10 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 
 **Goal:** Reduce local impersonation risk while preserving the current enrollment architecture.
 
-**Phase status:** In progress — implementation complete; Step 3a removed the three compiler errors that kept `SSP.Tests` from building, automated execution still requires a .NET 8 SDK machine
-**Current step:** Step 3a — awaiting execution in a .NET 8 SDK environment
+**Phase status:** Complete — merged; the full suite (658/658, including the six Phase 3 tests) passed on the merge branch in a .NET 8 SDK environment
+**Current step:** None (phase complete)
 **Code review:** Complete (self-review)
-**Automated tests:** Blocked — `dotnet` is unavailable in the current environment (the build-blocking errors are now fixed; the run itself still needs an SDK machine)
+**Automated tests:** Passed (658/658 post-merge validation)
 **Threat model update:** Complete
 
 ### Review and implementation scope
@@ -225,11 +250,11 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 
 **Goal:** Prevent deletion, rollback, or revival of old license state.
 
-**Phase status:** Not started  
-**Current step:** None  
-**Code review:** Not started  
-**Automated tests:** Not started  
-**Threat model update:** Not started
+**Phase status:** Implementation complete (Steps 4–6); automated validation pending a .NET 8 SDK environment  
+**Current step:** Step 6 — implementation complete, awaiting automated validation  
+**Code review:** Steps 4–6 complete (self-review)  
+**Automated tests:** Written for Steps 4–6 (27 new tests: 4 + 14 + 9); execution blocked in the current environment (`dotnet` unavailable)  
+**Threat model update:** Steps 4–6 complete
 
 ### Required implementation
 
@@ -244,15 +269,35 @@ This log is append-only. Add one entry after each step; do not remove prior entr
 
 ### Step completion record
 
-For each Phase 4 step, add a subsection here containing:
+#### Step 4 — Installation binding + monotonic state epoch
 
-- **Status:**
-- **What changed:**
-- **Affected files:**
-- **Tests performed and results:**
-- **Code review:**
-- **Threat model update:**
-- **Remaining risks:**
+- **Status:** Implementation complete; automated execution pending a .NET 8 SDK environment.
+- **What changed:** `LicenseStateRecord` gained `InstallationId` (domain-separated installation binding of the persisted license state) and `StateEpoch` (monotonic write counter). The store stamps both on save (adopting legacy records) and fails closed on load when a record names a different installation. Production composition passes `SspInstallationIdentityProvider.GetLicenseStateBindingId()` (new; `SSP-LICENSE-STATE-BIND-v1` domain separation) into the store. Unbound stores keep the exact pre-Phase-4 behaviour.
+- **Affected files:** `src/SSP.Activation/Models/LicenseStateRecord.cs`; `src/SSP.Core/Activation/SspLicensing.cs`; `src/SSP.Server/Activation/SspInstallationIdentityProvider.cs`; `src/SSP.Server/Activation/SspLicenseStateStore.cs`; `src/SSP.Server/Activation/SspActivationService.cs`; `tests/SSP.Tests/Activation/SspLicenseStateStoreTests.cs`.
+- **Tests performed and results:** Blocked in this environment (`dotnet: command not found`); four new tests written (`Save_StampsInstallationBindingAndMonotonicEpoch`, `Load_FailsClosed_WhenRecordBoundToAnotherInstallation`, `Load_WithoutConfiguredBinding_AcceptsAnyRecord`, `LegacyRecord_WithoutBinding_IsAdoptedAndUpgradedOnSave`); `git diff --check` passed; static verification of call-site compatibility and legacy deserialization performed.
+- **Code review:** Self-review complete — binding check fires only when both sides carry a binding; epoch is `max(record, on-disk) + 1` and cannot regress; the store can still only restrict authorization; no wire-protocol, client, network, or RSA-PSS change.
+- **Threat model update:** Complete for Step 4 (binding + epoch noted); the full T-entry for M-3 is added with Step 5 when the detection controls land.
+- **Remaining risks:** File deletion and same-installation file rollback are still undetected — Step 5 adds the redundant witness; enrollment-counter rollback (`.cache.dat`) is Step 6.
+
+#### Step 5 — Redundant witness: deletion recovery + rollback detection
+
+- **Status:** Implementation complete; automated execution pending a .NET 8 SDK environment.
+- **What changed:** A redundant envelope-encrypted witness of the monotonic license-state values is maintained OUTSIDE the licensing directory (`.ssp-state-witness/license/{hash}/.witness.dat`). A deleted state file with an intact witness recovers the floor and activation state from the witness (restrict-only lower bound; `LicenseStateDeletionRecovered` event); a state file older than the witnessed epoch fails closed (`LicenseStateRollbackDetected` event); corrupt/plaintext/foreign witness material fails closed; a missing witness is never a violation. `Save` writes primary-then-witness with max-merge monotonicity; the witness write is best effort. New event types 14/15 (both Warning) extend the reviewed taxonomy; `--license-status` shows the witness path.
+- **Affected files:** `src/SSP.Core/IO/ProtectedFileStore.cs`; `src/SSP.Core/IO/StateWitnessPaths.cs` (new); `src/SSP.Server/Activation/SspLicenseStateWitness.cs` (new); `src/SSP.Server/Activation/SspLicenseStateStore.cs`; `src/SSP.Server/Activation/SspLicensePaths.cs`; `src/SSP.Server/Activation/SspActivationService.cs`; `src/SSP.Activation/Models/LicenseSecurityEvent.cs`; `src/SSP.Server/Activation/SspSecurityEventSink.cs`; `tests/SSP.Tests/Activation/LicenseStateAntiRollbackTests.cs` (new); `tests/SSP.Tests/Activation/SspSecurityEventSinkTaxonomyTests.cs`.
+- **Tests performed and results:** Blocked in this environment (`dotnet: command not found`); 14 new tests written (see the Step 5 change-log entry for the covered scenarios); `git diff --check` passed; static verification performed.
+- **Code review:** Self-review complete — the witness can only restrict (missing witness never a violation; recovered values are a durable lower bound; max-merge writes never regress); the rollback rule is strict-epoch-only so legitimate cross-process races cannot false-positive; no wire-protocol, client, network, or RSA-PSS change; no private key material anywhere new.
+- **Threat model update:** Complete for Step 5 — T33 (license state deletion/rollback/revival, M-3) added with the licensing controls; asset table, limitations and residual risks updated (the enrollment half of T33/M-3 lands with Step 6).
+- **Remaining risks:** Coordinated rollback of BOTH primary and witness (or full machine-state reconstruction) by a local administrator remains possible — accepted residual. Persistently failing witness writes disable deletion detection only. Clock-based detection excluded (Phase 6).
+
+#### Step 6 — Enrollment-state anti-rollback (Phase 1/2 counters, cooldowns, revocations, consumption)
+
+- **Status:** Implementation complete; automated execution pending a .NET 8 SDK environment.
+- **What changed:** Enrollment witness (per hashed OTT: max failure count, latest cooldown instant, sticky revoked/consumed) stored outside the service directory, encrypted at rest. `ServerProtocol` rejects witness-revoked/consumed OTTs even when a rolled-back `.cache.dat` shows them pending; clamps the cooldown to the witnessed instant; counts new failures against the witnessed total (`max(config, witnessed+1)`, healing the config); records revocation/consumption in the witness after the config is persisted. New credential-free events `Enrollment.StateRollbackDetected` and `Enrollment.StateWitnessUnavailable` (+ best-effort `Enrollment.StateWitnessWriteFailed` diagnostic). The `EnrollmentCooldown` test helper applies its simulated clock change to the witness as well.
+- **Affected files:** `src/SSP.Server/Runtime/EnrollmentStateWitness.cs` (new); `src/SSP.Server/Runtime/ServerProtocol.cs`; `tests/SSP.Tests/EnrollmentStateAntiRollbackTests.cs` (new); `tests/SSP.Tests/Helpers/EnrollmentCooldown.cs`.
+- **Tests performed and results:** Blocked in this environment (`dotnet: command not found`); nine new tests written (revocation final; next wrong code after counter rollback revokes immediately; witnessed cooldown cannot be shrunk; consumed OTT cannot enroll twice; corrupt witness fails closed; consumption/revocation witnessed; witness encrypted at rest; fresh service enrolls normally); `git diff --check` passed; effective-count formula re-derived against normal/lag/rollback sequences.
+- **Code review:** Self-review complete — the witness can only restrict (clamps are upward-only; verdicts are sticky; nothing authorizes); config-before-witness ordering on every write; pre-check leaks no licensing or witness state (same "One-Time Token rejected." as an unknown OTT); no client, wire-protocol, OTT-generation, licensing or network change; no credentials in the witness or events.
+- **Threat model update:** Complete for Step 6 — T34 (enrollment state rollback) added; the §8 "Enrollment attempt tracking is local server state" limitation rewritten to reflect the witness; residual risks updated.
+- **Remaining risks:** Coordinated rollback of both the service directory and the witness tree by a local administrator (accepted residual); crash-window witness lag of one write (safe direction); host-clock changes still shift cooldowns (Phase 6).
 
 ---
 

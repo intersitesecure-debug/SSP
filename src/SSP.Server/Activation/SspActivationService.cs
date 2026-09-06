@@ -187,14 +187,22 @@ public sealed class SspActivationService : IDisposable
     {
         var resolvedPaths = paths ?? SspLicensePaths.Resolve();
         var trustAnchor = SspTrustAnchor.Create();
+        var identityProvider = new SspInstallationIdentityProvider();
+        var resolvedClock = clock ?? SystemClock.Instance;
+        var eventSink = new SspSecurityEventSink(resolvedPaths.SecurityLogDirectory, writeToConsole: false);
         return Compose(
             resolvedPaths,
             trustAnchor,
-            new SspInstallationIdentityProvider(),
-            new SspSecurityEventSink(resolvedPaths.SecurityLogDirectory, writeToConsole: false),
-            new SspLicenseStateStore(resolvedPaths.StateStorePath),
+            identityProvider,
+            eventSink,
+            new SspLicenseStateStore(
+                resolvedPaths.StateStorePath,
+                installationStateBindingId: identityProvider.GetLicenseStateBindingId(),
+                eventSink: eventSink,
+                clock: resolvedClock,
+                witnessPath: resolvedPaths.StateWitnessPath),
             new LocalLicenseFileProvider(resolvedPaths.LicenseFilePath),
-            clock ?? SystemClock.Instance,
+            resolvedClock,
             DefaultLicensePolicy.Instance);
     }
 
@@ -557,6 +565,7 @@ public sealed class SspActivationService : IDisposable
 
         builder.AppendLine($"  License file       : {Paths.LicenseFilePath}");
         builder.AppendLine($"  State store        : {Paths.StateStorePath}");
+        builder.AppendLine($"  State witness      : {Paths.StateWitnessPath}");
         builder.AppendLine($"  Security log       : {Path.Combine(Paths.SecurityLogDirectory, SspSecurityEventSink.LogFileName)}");
         return builder.ToString();
     }

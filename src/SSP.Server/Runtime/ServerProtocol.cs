@@ -227,6 +227,37 @@ public sealed class ServerProtocol : IDisposable
             throw new UnauthorizedAccessException("One-Time Token rejected.");
         }
 
+        // Phase 4 (M-3): enrollment-state anti-rollback. The Phase 1/2
+        // failure counter, cooldown and revocation state live in .cache.dat,
+        // which a local administrator can roll back to an older copy. The
+        // redundant witness (outside the service directory) remembers the
+        // monotonic per-OTT abuse state and is consulted before any code is
+        // minted or any failure is recorded.
+        EnrollmentOttWitnessEntry? witnessEntry;
+        try
+        {
+            witnessEntry = (await EnrollmentStateWitnessStore.LoadAsync(_serviceDir, ct).ConfigureAwait(false))
+                ?.Find(presentedHash);
+        }
+        catch (InvalidDataException)
+        {
+            // A present-but-corrupt/foreign/plaintext witness is an integrity
+            // violation: fail closed for enrollment rather than recording
+            // attempts against unknown state.
+            ReportEnrollmentSecurityEvent("Enrollment.StateWitnessUnavailable", null);
+            throw new UnauthorizedAccessException("One-Time Token rejected.");
+        }
+
+        if (witnessEntry is { Revoked: true } or { Consumed: true })
+        {
+            // This OTT was permanently revoked (Phase 1 three-attempt lockout)
+            // or consumed by a completed enrollment, yet .cache.dat presents
+            // it as pending again: the config was rolled back. The witnessed
+            // verdict is final.
+            ReportEnrollmentSecurityEvent("Enrollment.StateRollbackDetected", witnessEntry.FailedAttempts);
+            throw new UnauthorizedAccessException("One-Time Token rejected.");
+        }
+
         // Verify the client's signature over ClientNonce using the
         // presented ClientPublicKey (we have not stored it yet).
         using var clientRsa = RsaCrypto.ImportPublicKeyPem(bundle.ClientPublicKeyPem);
@@ -280,12 +311,34 @@ public sealed class ServerProtocol : IDisposable
         // presenter has proven possession of this OTT and before any code is
         // generated or displayed, so a hammering client cannot obtain fresh
         // guesses and other pending OTTs are not delayed.
-        var retryNotBeforeUtc = matchedPending?.AuthenticationCodeRetryNotBeforeUtc
+        //
+        // Phase 4 (M-3): the WITNESSED cooldown instant is a durable lower
+        // bound that a rolled-back .cache.dat cannot shrink - the effective
+        // retry instant is the later of the config and witness values.
+        var configRetryNotBeforeUtc = matchedPending?.AuthenticationCodeRetryNotBeforeUtc
             ?? (matchedLegacy ? config.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc : null);
-        if (!AuthenticationCodeAbusePolicy.IsRetryAllowed(retryNotBeforeUtc, DateTimeOffset.UtcNow))
+        var effectiveRetryNotBeforeUtc = EnrollmentStateWitnessStore.LaterRetryNotBefore(
+            configRetryNotBeforeUtc,
+            witnessEntry?.RetryNotBeforeUtc);
+
+        var configFailedAttempts = matchedPending?.FailedAuthenticationCodeAttempts
+            ?? (matchedLegacy ? config.ActiveOneTimeTokenFailedAuthenticationCodeAttempts : 0);
+
+        if (witnessEntry is not null &&
+            (witnessEntry.FailedAttempts > configFailedAttempts ||
+             (witnessEntry.RetryNotBeforeUtc is not null &&
+              !string.Equals(effectiveRetryNotBeforeUtc, configRetryNotBeforeUtc, StringComparison.Ordinal))))
         {
-            var failedAttempts = matchedPending?.FailedAuthenticationCodeAttempts
-                ?? config.ActiveOneTimeTokenFailedAuthenticationCodeAttempts;
+            // The config sits below the witnessed abuse state: the counter
+            // was rolled back and/or the witnessed cooldown is still in
+            // force. Credential-free operator signal; the clamped values are
+            // enforced below regardless.
+            ReportEnrollmentSecurityEvent("Enrollment.StateRollbackDetected", witnessEntry.FailedAttempts);
+        }
+
+        if (!AuthenticationCodeAbusePolicy.IsRetryAllowed(effectiveRetryNotBeforeUtc, DateTimeOffset.UtcNow))
+        {
+            var failedAttempts = Math.Max(configFailedAttempts, witnessEntry?.FailedAttempts ?? 0);
             ReportEnrollmentSecurityEvent("Enrollment.AuthenticationCodeRateLimited", failedAttempts);
 
             var rateLimited = new EnrollmentResultMessage
@@ -428,6 +481,26 @@ public sealed class ServerProtocol : IDisposable
                 }
             }
             await PersistConfigAsync(configPath, config, ct).ConfigureAwait(false);
+
+            // Phase 4 (M-3): record the OTT as consumed in the witness so a
+            // rolled-back .cache.dat cannot revive a spent OTT. Config first,
+            // witness second (a crash between the two leaves the witness
+            // lagging, which is the safe direction). Best effort: the
+            // enrollment has already committed, so a witness failure must not
+            // fail the committed outcome.
+            try
+            {
+                var witness = await EnrollmentStateWitnessStore.LoadAsync(_serviceDir, ct).ConfigureAwait(false)
+                              ?? new EnrollmentStateWitnessFile();
+                witness.GetOrAdd(presentedHash).Consumed = true;
+                await EnrollmentStateWitnessStore.SaveAsync(_serviceDir, witness, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException
+                                       or CryptographicException or PlatformNotSupportedException)
+            {
+                Console.Error.WriteLine(
+                    $"[security] event=Enrollment.StateWitnessWriteFailed type={ex.GetType().Name}");
+            }
         }
 
         await SendOutcomeAsync(stream, true, "You verified", ct).ConfigureAwait(false);
@@ -465,6 +538,13 @@ public sealed class ServerProtocol : IDisposable
     /// all copies of the same client package are permanently unable to retry.
     /// The caller holds the per-service enrollment semaphore, while this method
     /// takes the cross-process configuration lock used by all OTT mutations.
+    ///
+    /// Phase 4 (M-3): the failure is also max-merged into the enrollment
+    /// witness (outside the service directory), and the EFFECTIVE attempt
+    /// count — everything ever witnessed for this OTT plus the current
+    /// attempt when the config was rolled back below the witnessed state —
+    /// drives both the cooldown and the revocation decision. A rolled-back
+    /// .cache.dat therefore cannot buy fresh guesses.
     /// </summary>
     private async Task<bool> RecordFailedAuthenticationCodeAttemptAsync(
         string configPath,
@@ -475,6 +555,21 @@ public sealed class ServerProtocol : IDisposable
         {
             var current = await ServiceConfigStore.LoadAsync(configPath, ct).ConfigureAwait(false);
             current.PendingOneTimeTokens ??= new List<PendingOneTimeToken>();
+
+            EnrollmentStateWitnessFile witness;
+            try
+            {
+                witness = await EnrollmentStateWitnessStore.LoadAsync(_serviceDir, ct).ConfigureAwait(false)
+                          ?? new EnrollmentStateWitnessFile();
+            }
+            catch (InvalidDataException)
+            {
+                // A corrupt/foreign/plaintext witness is an integrity
+                // violation: fail closed instead of recording failures
+                // against unknown state. The config is left untouched.
+                ReportEnrollmentSecurityEvent("Enrollment.StateWitnessUnavailable", null);
+                throw new UnauthorizedAccessException("One-Time Token rejected.");
+            }
 
             var pending = current.PendingOneTimeTokens.FirstOrDefault(p =>
                 TokenGenerator.ConstantTimeEquals(p.OneTimeTokenHash, presentedHash));
@@ -498,19 +593,40 @@ public sealed class ServerProtocol : IDisposable
                 return true;
             }
 
-            var retryAt = AuthenticationCodeAbusePolicy.NextRetryUtc(attempts, DateTimeOffset.UtcNow);
+            // The witnessed count is a durable lower bound. The EFFECTIVE
+            // count of real failures is the config counter (which just
+            // counted this attempt) or — when the config was rolled back
+            // below the witnessed state — everything ever witnessed PLUS
+            // this attempt. A rolled-back .cache.dat therefore never buys a
+            // fresh guess budget.
+            var entry = witness.GetOrAdd(presentedHash);
+            var effectiveAttempts = Math.Max(attempts, entry.FailedAttempts + 1);
+
+            var retryAt = AuthenticationCodeAbusePolicy.NextRetryUtc(effectiveAttempts, DateTimeOffset.UtcNow);
             if (pending is not null)
+            {
+                // Heal the config to the effective count so config and
+                // witness re-converge after a rollback.
+                pending.FailedAuthenticationCodeAttempts = effectiveAttempts;
                 pending.AuthenticationCodeRetryNotBeforeUtc = retryAt;
+            }
             if (!string.IsNullOrEmpty(current.ActiveOneTimeTokenHash) &&
                 TokenGenerator.ConstantTimeEquals(current.ActiveOneTimeTokenHash, presentedHash))
             {
-                current.ActiveOneTimeTokenFailedAuthenticationCodeAttempts = attempts;
+                current.ActiveOneTimeTokenFailedAuthenticationCodeAttempts = effectiveAttempts;
                 current.ActiveOneTimeTokenAuthenticationCodeRetryNotBeforeUtc = retryAt;
             }
 
-            var revoked = attempts >= MaximumAuthenticationCodeAttempts;
+            entry.FailedAttempts = Math.Max(entry.FailedAttempts, effectiveAttempts);
+            entry.RetryNotBeforeUtc = EnrollmentStateWitnessStore.LaterRetryNotBefore(
+                entry.RetryNotBeforeUtc,
+                retryAt);
+
+            var revoked = effectiveAttempts >= MaximumAuthenticationCodeAttempts;
             if (revoked)
             {
+                entry.Revoked = true;
+
                 current.PendingOneTimeTokens.RemoveAll(p =>
                     TokenGenerator.ConstantTimeEquals(p.OneTimeTokenHash, presentedHash));
 
@@ -524,6 +640,21 @@ public sealed class ServerProtocol : IDisposable
             }
 
             await PersistConfigAsync(configPath, current, ct).ConfigureAwait(false);
+
+            // Config first, witness second (a crash between the two leaves the
+            // witness lagging, which is the safe direction). Best effort: the
+            // config has already recorded the failure durably.
+            try
+            {
+                await EnrollmentStateWitnessStore.SaveAsync(_serviceDir, witness, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                       or CryptographicException or PlatformNotSupportedException)
+            {
+                Console.Error.WriteLine(
+                    $"[security] event=Enrollment.StateWitnessWriteFailed type={ex.GetType().Name}");
+            }
+
             return revoked;
         }
     }

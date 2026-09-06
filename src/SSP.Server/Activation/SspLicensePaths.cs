@@ -84,6 +84,18 @@ public sealed record SspLicensePaths
     /// <summary>Full path of the encrypted anti-rollback state file.</summary>
     public string StateStorePath => Path.Combine(LicenseDirectory, StateFileName);
 
+    /// <summary>
+    /// Full path of the redundant encrypted anti-rollback WITNESS file
+    /// (Phase 4 / M-3). The witness deliberately lives OUTSIDE the licensing
+    /// directory — one directory level above it, in the
+    /// <c>.ssp-state-witness</c> tree — so deleting, rolling back or
+    /// restoring the licensing directory itself cannot take the witness with
+    /// it. Kept in sync with <see cref="SspLicenseStateStore.WitnessPath"/>
+    /// (both derive through <see cref="SSP.Core.IO.SspStateWitnessPaths"/>).
+    /// </summary>
+    public string StateWitnessPath =>
+        SspStateWitnessPaths.GetWitnessPath(LicenseDirectory, SspStateWitnessPaths.LicenseStatePurpose);
+
     /// <summary>Directory the security event sink writes <see cref="SspSecurityEventSink.LogFileName"/> into.</summary>
     public string SecurityLogDirectory => LicenseDirectory;
 

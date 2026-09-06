@@ -245,6 +245,8 @@ internal static class LicensingEventLogTaxonomy
         LicenseSecurityEventType.ProtectedOperationDenied => System.Diagnostics.EventLogEntryType.Warning,
         LicenseSecurityEventType.ActivationRequired => System.Diagnostics.EventLogEntryType.Information,
         LicenseSecurityEventType.LicenseActivated => System.Diagnostics.EventLogEntryType.Information,
+        LicenseSecurityEventType.LicenseStateRollbackDetected => System.Diagnostics.EventLogEntryType.Warning,
+        LicenseSecurityEventType.LicenseStateDeletionRecovered => System.Diagnostics.EventLogEntryType.Warning,
         _ => System.Diagnostics.EventLogEntryType.Warning,
     };
 }
