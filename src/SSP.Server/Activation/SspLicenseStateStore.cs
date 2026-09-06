@@ -121,7 +121,7 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
         _eventSink = eventSink;
         _clock = clock;
 
-        var stateDirectory = Path.GetDirectoryName(Path.GetFullPath(path));
+        var stateDirectory = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path));
         if (string.IsNullOrEmpty(stateDirectory))
         {
             stateDirectory = ".";
@@ -274,7 +274,7 @@ public sealed class SspLicenseStateStore : ILicenseStateStore
 
         lock (_gate)
         {
-            var directory = Path.GetDirectoryName(_path);
+            var directory = System.IO.Path.GetDirectoryName(_path);
             if (!string.IsNullOrEmpty(directory))
             {
                 Directory.CreateDirectory(directory);
