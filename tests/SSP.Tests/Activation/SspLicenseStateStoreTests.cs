@@ -290,7 +290,7 @@ public class SspLicenseStateStoreTests
     }
 
     [Fact]
-    public void LegacyRecord_WithoutBinding_IsAdoptedAndUpgradedOnSave()
+    public async Task LegacyRecord_WithoutBinding_IsAdoptedAndUpgradedOnSave()
     {
         var dir = CreateTempDir();
         try
@@ -304,7 +304,7 @@ public class SspLicenseStateStoreTests
                 LastAcceptedLicenseId = Guid.Parse("01234567-89ab-cdef-0123-456789abcdef"),
             };
             var json = JsonSerializer.Serialize(legacy, new JsonSerializerOptions { WriteIndented = true });
-            ProtectedFileStore.WriteTextAsync(path, json).GetAwaiter().GetResult();
+            await ProtectedFileStore.WriteTextAsync(path, json);
 
             // It loads (adoption, never rejection - existing installations
             // must not brick)...

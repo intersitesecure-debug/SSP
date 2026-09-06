@@ -7,6 +7,7 @@
 // Callers work with UTF-8 JSON; the protected service files are encrypted
 // on disk by ProtectedFileStore.
 
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SSP.Core.Models;
@@ -33,26 +34,32 @@ public static class JsonOptions
 /// Atomic file writer: writes to a temp file in the same directory then
 /// renames it into place. Survives a crash mid-write without leaving a
 /// truncated file behind.
+///
+/// The commit phase (create the temp file, then <c>File.Replace</c> /
+/// <c>File.Move</c> it over the target) retries a bounded number of times on
+/// <see cref="IOException"/>. Every retried attempt rewrites the temp file
+/// from scratch, so the operation stays atomic and idempotent. On Windows a
+/// real-time scanner (antivirus, search indexer) can briefly hold either the
+/// freshly written <c>.tmp</c> file or the target open without delete
+/// sharing; that makes the rename fail with a transient sharing violation
+/// even though the caller did nothing wrong. Deterministic failures (a
+/// directory occupying the path, access denied, a full disk, an invalid
+/// path) are never retried away: each attempt rethrows and the final attempt
+/// surfaces the error to the caller, which is what the fail-closed callers
+/// (for example the license state store's mandatory time checkpoints) rely
+/// on.
 /// </summary>
 public static class AtomicFile
 {
-    public static async Task WriteTextAsync(string path, string content, CancellationToken ct = default)
-    {
-        var dir = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+    /// <summary>
+    /// Number of commit attempts. With the doubling delay below this bounds
+    /// a transient collision to roughly 1.3 seconds before the final error
+    /// propagates.
+    /// </summary>
+    private const int MaxCommitAttempts = 8;
 
-        var tmp = path + ".tmp";
-        await using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
-        {
-            await using var sw = new StreamWriter(fs);
-            await sw.WriteAsync(content.AsMemory(), ct).ConfigureAwait(false);
-        }
-
-        if (File.Exists(path))
-            File.Replace(tmp, path, null);
-        else
-            File.Move(tmp, path);
-    }
+    public static Task WriteTextAsync(string path, string content, CancellationToken ct = default)
+        => WriteBytesAsync(path, Encoding.UTF8.GetBytes(content), ct);
 
     public static async Task WriteBytesAsync(string path, byte[] content, CancellationToken ct = default)
     {
@@ -60,11 +67,33 @@ public static class AtomicFile
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
         var tmp = path + ".tmp";
-        await using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+        var retryDelay = TimeSpan.FromMilliseconds(10);
+        for (var attempt = 1; ; attempt++)
         {
-            await fs.WriteAsync(content.AsMemory(0, content.Length), ct).ConfigureAwait(false);
-        }
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                await using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    await fs.WriteAsync(content.AsMemory(0, content.Length), ct).ConfigureAwait(false);
+                }
 
+                Commit(tmp, path);
+                return;
+            }
+            catch (IOException) when (attempt < MaxCommitAttempts)
+            {
+                // A transient sharing violation (see the class remarks), not
+                // a data-loss failure: the previous attempt never committed
+                // a partial file, so waiting briefly and rewriting is safe.
+                await Task.Delay(retryDelay, ct).ConfigureAwait(false);
+                retryDelay += retryDelay;
+            }
+        }
+    }
+
+    private static void Commit(string tmp, string path)
+    {
         if (File.Exists(path))
             File.Replace(tmp, path, null);
         else

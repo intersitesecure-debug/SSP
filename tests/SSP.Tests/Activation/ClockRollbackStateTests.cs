@@ -378,7 +378,13 @@ public class ClockRollbackStateTests
     private const string ProbePipeVariable = "SSP_TEST_CLOCK_LOCK_PROBE_PIPE";
     private const string ProbeStateVariable = "SSP_TEST_CLOCK_LOCK_PROBE_STATE";
 
-    [Fact(Timeout = 90_000)]
+    // The child is a second full `dotnet vstest` host. Under the parallel
+    // suite that host can take tens of seconds just to start (testhost
+    // spawn + discovery on a loaded machine), and the assertions below must
+    // stay sequential. Every per-step window is therefore sized for a loaded
+    // machine; the Fact timeout is only the final backstop against a child
+    // that never connects at all.
+    [Fact(Timeout = 300_000)]
     public async Task FileLease_IsExclusiveAcrossProcesses()
     {
         if (Environment.GetEnvironmentVariable(ProbePipeVariable) is { } childPipe)
@@ -408,18 +414,25 @@ public class ClockRollbackStateTests
         var stderr = process.StandardError.ReadToEndAsync();
         try
         {
-            using var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            // The child testhost is only expected to connect once its full
+            // discovery pass has run; under the parallel suite that alone can
+            // take tens of seconds, so the connect window is the largest one.
+            using var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(100));
             await pipe.WaitForConnectionAsync(connectTimeout.Token);
             using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
             using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
-            Assert.Equal("locked", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("locked", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(30)));
 
-            var decision = await Task.Run(() => service.Enforcement.RequireValidLicense()).WaitAsync(TimeSpan.FromSeconds(15));
+            // The parent's lease acquisition is bounded (it must fail closed
+            // while the child holds the lease), so the decision itself takes
+            // the full acquisition bound; the cap only covers scheduling lag.
+            var decision = await Task.Run(() => service.Enforcement.RequireValidLicense()).WaitAsync(TimeSpan.FromSeconds(60));
             Assert.False(decision.IsAllowed);
             Assert.Equal(LicenseReasons.StateStoreUnavailable, service.LastValidationResult!.ReasonCode);
             await writer.WriteLineAsync("release");
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
-            Assert.True(process.ExitCode == 0, (await stdout) + (await stderr));
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            if (process.ExitCode != 0)
+                Assert.True(false, await CollectChildOutputAsync(stdout, stderr));
             Assert.True(service.Revalidate().IsValid); // a stale empty .lock file is not a lock
         }
         finally
@@ -427,7 +440,7 @@ public class ClockRollbackStateTests
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
             }
         }
     }
@@ -435,13 +448,32 @@ public class ClockRollbackStateTests
     private static void RunLockProbe(string pipeName, string statePath)
     {
         using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
-        pipe.Connect(20_000);
+        pipe.Connect(60_000);
         using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
         using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
         // Synchronous lease: acquire and dispose on the same thread, no await.
         using var lease = ((ILicenseTimeStateLock)new SspLicenseStateStore(statePath)).AcquireTimeStateLock();
         writer.WriteLine("locked");
         Assert.Equal("release", reader.ReadLine());
+    }
+
+    /// <summary>
+    /// Child stdout/stderr are only diagnostic text for the exit-code
+    /// assertion. After the process exits the pipes close, but a lingering
+    /// child (for example a testhost grandchild kept alive by a failed run)
+    /// can hold them open, so the read must never block the test itself.
+    /// </summary>
+    private static async Task<string> CollectChildOutputAsync(Task<string> stdout, Task<string> stderr)
+    {
+        try
+        {
+            var output = await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(30));
+            return output[0] + output[1];
+        }
+        catch (Exception ex)
+        {
+            return $"(child output unavailable: {ex.GetType().Name})";
+        }
     }
 
     private sealed class ObservedStore : ILicenseStateStore, ILicenseTimeStateLock
