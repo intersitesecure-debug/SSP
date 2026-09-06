@@ -5,6 +5,19 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
+    <!--
+      Executable so the assembly carries the entry point used by
+      ClockRollbackStateTests.FileLease_IsExclusiveAcrossProcesses: the test
+      starts a real second process with `dotnet exec <this assembly>`, which
+      acquires the production cross-process lease through the public
+      ILicenseTimeStateLock seam. `dotnet exec` needs the runtimeconfig.json
+      that only an Exe emits, and the probe must start without the adapter
+      discovery/test enumeration of a second `dotnet vstest` host (which is
+      what used to push the test past its Fact timeout). VSTest still
+      discovers and runs the tests in this assembly normally.
+    -->
+    <OutputType>Exe</OutputType>
+
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
